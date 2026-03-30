@@ -847,62 +847,158 @@ class SceneGame extends Phaser.Scene {
         }).setOrigin(0.5).setDepth(100);
     }
 
-    // ========== CONTROLES TACTILES ==========
+    // ========== CONTROLES TACTILES — JOYSTICK VIRTUAL ==========
     crearControlesTactiles() {
         const { W, H, offX, offY, tile } = this.L;
-        const depth = 200, alpha = 0.45;
+        const depth = 200;
         const gridRight = offX + COLS * tile;
         const gridBottom = offY + ROWS * tile;
 
-        let dpadX, dpadY, bombX, bombY, btnSize;
+        // Calcular zona del joystick y botón bomba
+        let joyZoneX, joyZoneY, joyZoneW, joyZoneH, bombX, bombY, bombR;
 
         if (ES_PORTRAIT) {
-            // Debajo del mapa
-            const midY = gridBottom + (H - gridBottom) / 2;
-            dpadX = W * 0.22;
-            dpadY = midY;
-            bombX = W * 0.78;
-            bombY = midY;
-            btnSize = Math.max(28, Math.min(44, (H - gridBottom - 24) / 2.8));
+            const areaH = H - gridBottom;
+            joyZoneX = 0;
+            joyZoneY = gridBottom;
+            joyZoneW = W * 0.6;
+            joyZoneH = areaH;
+            bombX = W * 0.8;
+            bombY = gridBottom + areaH / 2;
+            bombR = Math.max(30, Math.min(50, areaH / 3.5));
         } else {
-            // A la derecha del mapa
-            dpadX = gridRight + (W - gridRight) * 0.32;
-            dpadY = H / 2;
-            bombX = gridRight + (W - gridRight) * 0.76;
+            const areaW = W - gridRight;
+            joyZoneX = gridRight;
+            joyZoneY = 0;
+            joyZoneW = areaW * 0.6;
+            joyZoneH = H;
+            bombX = gridRight + areaW * 0.78;
             bombY = H / 2;
-            btnSize = Math.max(28, Math.min(44, (W - gridRight) / 5.5));
+            bombR = Math.max(30, Math.min(50, areaW / 4));
         }
 
-        // Fondo D-pad
-        this.add.circle(dpadX, dpadY, btnSize * 2.1, 0x000000, 0.2).setDepth(depth - 1);
+        // Radio del joystick
+        const joyRadius = Math.max(36, Math.min(60, Math.min(joyZoneW, joyZoneH) / 3.5));
+        const thumbRadius = Math.round(joyRadius * 0.45);
+        const deadZone = joyRadius * 0.2;  // zona muerta central
 
-        // Botones D-pad
-        [
-            { dx: 0, dy: -btnSize, icon: '▲', dir: 'up' },
-            { dx: 0, dy: btnSize, icon: '▼', dir: 'down' },
-            { dx: -btnSize, dy: 0, icon: '◀', dir: 'left' },
-            { dx: btnSize, dy: 0, icon: '▶', dir: 'right' },
-        ].forEach(({ dx, dy, icon, dir }) => {
-            const btn = this.add.rectangle(dpadX + dx, dpadY + dy, btnSize, btnSize, 0x4488ff, alpha)
-                .setDepth(depth).setInteractive().setStrokeStyle(1, 0xffffff, 0.3);
-            this.add.text(dpadX + dx, dpadY + dy, icon, {
-                fontSize: Math.round(btnSize * 0.55) + 'px', color: '#ffffff'
-            }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
+        // Zona interactiva invisible para capturar toques del joystick
+        const joyZone = this.add.rectangle(
+            joyZoneX + joyZoneW / 2, joyZoneY + joyZoneH / 2,
+            joyZoneW, joyZoneH, 0x000000, 0.001
+        ).setDepth(depth - 2).setInteractive();
 
-            btn.on('pointerdown', () => { this.touchDir = dir; btn.setFillStyle(0x66aaff, 0.85); });
-            btn.on('pointerup', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
-            btn.on('pointerout', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
+        // Base del joystick (circulo exterior)
+        this.joyBase = this.add.circle(0, 0, joyRadius, 0x000000, 0.35)
+            .setDepth(depth - 1).setStrokeStyle(2, 0xffffff, 0.2).setVisible(false);
+
+        // Thumb del joystick (circulo interior que sigue el dedo)
+        this.joyThumb = this.add.circle(0, 0, thumbRadius, 0x4488ff, 0.7)
+            .setDepth(depth).setStrokeStyle(2, 0xffffff, 0.5).setVisible(false);
+
+        // Indicadores de dirección en la base (sutiles)
+        this.joyArrows = [];
+        const arrowDirs = [
+            { angle: 0, icon: '▶' }, { angle: Math.PI, icon: '◀' },
+            { angle: -Math.PI / 2, icon: '▲' }, { angle: Math.PI / 2, icon: '▼' }
+        ];
+        arrowDirs.forEach(({ angle, icon }) => {
+            const arrow = this.add.text(0, 0, icon, {
+                fontSize: Math.round(joyRadius * 0.3) + 'px', color: '#ffffff'
+            }).setOrigin(0.5).setDepth(depth).setAlpha(0.3).setVisible(false);
+            this.joyArrows.push({ sprite: arrow, angle });
         });
 
-        // Boton bomba
-        const bombR = Math.round(btnSize * 1.15);
+        // Estado del joystick
+        this.joyActive = false;
+        this.joyOriginX = 0;
+        this.joyOriginY = 0;
+
+        // Activar joystick al tocar la zona
+        joyZone.on('pointerdown', (pointer) => {
+            this.joyActive = true;
+            this.joyOriginX = pointer.x;
+            this.joyOriginY = pointer.y;
+
+            this.joyBase.setPosition(pointer.x, pointer.y).setVisible(true);
+            this.joyThumb.setPosition(pointer.x, pointer.y).setVisible(true);
+
+            // Posicionar flechas alrededor de la base
+            const arrowR = joyRadius * 0.72;
+            this.joyArrows.forEach(({ sprite, angle }) => {
+                sprite.setPosition(
+                    pointer.x + Math.cos(angle) * arrowR,
+                    pointer.y + Math.sin(angle) * arrowR
+                ).setVisible(true).setAlpha(0.3);
+            });
+        });
+
+        // Mover el thumb siguiendo el dedo
+        this.input.on('pointermove', (pointer) => {
+            if (!this.joyActive) return;
+
+            const dx = pointer.x - this.joyOriginX;
+            const dy = pointer.y - this.joyOriginY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            // Limitar el thumb al radio del joystick
+            let thumbX, thumbY;
+            if (dist <= joyRadius) {
+                thumbX = pointer.x;
+                thumbY = pointer.y;
+            } else {
+                thumbX = this.joyOriginX + (dx / dist) * joyRadius;
+                thumbY = this.joyOriginY + (dy / dist) * joyRadius;
+            }
+            this.joyThumb.setPosition(thumbX, thumbY);
+
+            // Determinar dirección (4 direcciones) si supera zona muerta
+            if (dist > deadZone) {
+                const angle = Math.atan2(dy, dx);
+                // Dividir en 4 cuadrantes
+                if (angle > -Math.PI / 4 && angle <= Math.PI / 4) {
+                    this.touchDir = 'right';
+                } else if (angle > Math.PI / 4 && angle <= 3 * Math.PI / 4) {
+                    this.touchDir = 'down';
+                } else if (angle > -3 * Math.PI / 4 && angle <= -Math.PI / 4) {
+                    this.touchDir = 'up';
+                } else {
+                    this.touchDir = 'left';
+                }
+
+                // Resaltar flecha activa
+                const dirMap = { 'right': 0, 'left': 1, 'up': 2, 'down': 3 };
+                this.joyArrows.forEach(({ sprite }, i) => {
+                    sprite.setAlpha(i === dirMap[this.touchDir] ? 0.9 : 0.25);
+                });
+
+                // Color del thumb según dirección activa
+                this.joyThumb.setFillStyle(0x66aaff, 0.85);
+            } else {
+                this.touchDir = null;
+                this.joyArrows.forEach(({ sprite }) => sprite.setAlpha(0.3));
+                this.joyThumb.setFillStyle(0x4488ff, 0.7);
+            }
+        });
+
+        // Soltar el joystick
+        this.input.on('pointerup', (pointer) => {
+            if (!this.joyActive) return;
+            this.joyActive = false;
+            this.touchDir = null;
+            this.joyBase.setVisible(false);
+            this.joyThumb.setVisible(false);
+            this.joyArrows.forEach(({ sprite }) => sprite.setVisible(false));
+        });
+
+        // Botón bomba (se mantiene igual, lado derecho)
         const btnBomb = this.add.circle(bombX, bombY, bombR, 0xe94560, 0.55)
             .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.4);
-        this.add.text(bombX, bombY - Math.round(btnSize * 0.18), '💣', {
-            fontSize: Math.round(btnSize * 0.72) + 'px'
+        this.add.text(bombX, bombY - Math.round(bombR * 0.15), '💣', {
+            fontSize: Math.round(bombR * 0.65) + 'px'
         }).setOrigin(0.5).setDepth(depth + 1);
-        this.add.text(bombX, bombY + Math.round(btnSize * 0.58), 'BOMBA', {
-            fontSize: Math.max(8, Math.round(btnSize * 0.28)) + 'px',
+        this.add.text(bombX, bombY + Math.round(bombR * 0.55), 'BOMBA', {
+            fontSize: Math.max(8, Math.round(bombR * 0.25)) + 'px',
             fontFamily: 'Arial Black', color: '#ffffff'
         }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
 
