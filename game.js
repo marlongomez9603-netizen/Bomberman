@@ -1,7 +1,7 @@
 // ============================================================
 //  BOMBERMAN 1v1 ONLINE
 //  Phaser 3 + Supabase Realtime Broadcast
-//  Pixel Art clasico generado por codigo (sin assets externos)
+//  Sprites reales + 5 mapas + portrait/landscape + 4 personajes
 // ============================================================
 
 // --- SUPABASE CONFIG ---
@@ -10,41 +10,80 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
-//  CONSTANTES DEL JUEGO
+//  DETECCION DE DISPOSITIVO Y PANTALLA
 // ============================================================
-const TILE = 48;          // Tamano de cada casilla en pixeles
-const COLS = 15;          // Columnas del mapa
-const ROWS = 13;          // Filas del mapa
-const OFFSET_X = 280;     // Margen izquierdo del area de juego
-const OFFSET_Y = 48;      // Margen superior
-const BOMB_TIMER = 2500;  // Tiempo antes de explotar (ms)
-const EXPLOSION_DURATION = 500; // Duracion de la explosion visible (ms)
-const BASE_SPEED = 150;   // Velocidad base en pixeles/segundo
-const SPEED_BOOST = 30;   // Aumento por cada power-up de velocidad
-const SYNC_INTERVAL = 50; // Enviar posicion cada 50ms
-
-// Detectar si es movil
 const ES_MOVIL = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
-    (window.innerWidth < 800 && 'ontouchstart' in window);
+    (window.innerWidth < 900 && 'ontouchstart' in window);
+const SCREEN_W = window.innerWidth;
+const SCREEN_H = window.innerHeight;
+const ES_PORTRAIT = SCREEN_H > SCREEN_W;
 
-// Offsets dinamicos segun dispositivo
-const OFFSET_X_DESKTOP = 280;
-const OFFSET_X_MOBILE = 16;
-const OFFSET_Y_MOBILE = 16;
-const GAME_OFFSET_X = ES_MOVIL ? OFFSET_X_MOBILE : OFFSET_X_DESKTOP;
-const GAME_OFFSET_Y = ES_MOVIL ? OFFSET_Y_MOBILE : OFFSET_Y;
+// Recargar al rotar para recalcular layout
+window.addEventListener('orientationchange', () => setTimeout(() => location.reload(), 400));
 
-// Estado global de la partida
+// ============================================================
+//  CONSTANTES BASE
+// ============================================================
+const TILE_BASE = 48;
+const COLS = 15;
+const ROWS = 13;
+const BOMB_TIMER = 2500;
+const EXPLOSION_DURATION = 500;
+const BASE_SPEED = 150;
+const SPEED_BOOST = 30;
+const SYNC_INTERVAL = 50;
+
+// Nombres y colores de los 4 personajes
+const PERSONAJES = [
+    { nombre: 'Bomber',  color: '#e94560' },
+    { nombre: 'Dark',    color: '#cc44ff' },
+    { nombre: 'Astro',   color: '#ffcc00' },
+    { nombre: 'Classic', color: '#4488ff' },
+];
+
+// Nombres de los 5 mapas
+const MAPAS_NOMBRES = ['Clasico', 'Ruinas', 'Industrial', 'Bosque', 'Templo'];
+
+// Estado global
 let estadoGlobal = {
     idSala: null,
     nombreJugador: '',
     numJugador: null,
-    canal: null
+    canal: null,
+    personaje: 0,
+    personajeRival: 0,
+    selectedMap: 0
 };
 
 // ============================================================
+//  CALCULO DE LAYOUT RESPONSIVE
+// ============================================================
+function calcLayout(W, H) {
+    let tile, offX, offY;
+
+    if (!ES_MOVIL) {
+        // Desktop: panel izquierdo 280px
+        tile = 48;
+        offX = 280;
+        offY = 48;
+    } else if (ES_PORTRAIT) {
+        // Portrait: grid llena el ancho
+        tile = Math.floor((W - 16) / COLS);
+        offX = Math.floor((W - tile * COLS) / 2);
+        offY = 42;
+    } else {
+        // Landscape mobile: grid llena el alto disponible
+        tile = Math.max(20, Math.floor((H - 42) / ROWS));
+        offX = 8;
+        offY = Math.floor((H - tile * ROWS) / 2 + 4);
+    }
+
+    tile = Math.max(16, Math.min(tile, 48));
+    return { W, H, tile, offX, offY };
+}
+
+// ============================================================
 //  GENERADOR DE RANDOM CON SEMILLA
-//  (Para que ambos jugadores generen el mismo mapa)
 // ============================================================
 function seededRandom(seed) {
     let s = Math.abs(seed) || 1;
@@ -55,121 +94,124 @@ function seededRandom(seed) {
 }
 
 // ============================================================
-//  GENERADOR DE MAPA
+//  GENERADOR DE MAPA — 5 tipos
+//  fullSeed = timestamp * 10 + mapType  (mapType 0-4)
 // ============================================================
-function generarMapa(seed) {
-    const rand = seededRandom(seed);
+function generarMapa(fullSeed) {
+    const mapType = fullSeed % 10;
+    const actualSeed = Math.floor(fullSeed / 10);
+    const rand = seededRandom(actualSeed);
     const mapa = [];
     const powerups = {};
 
+    // Paredes base
     for (let y = 0; y < ROWS; y++) {
         mapa[y] = [];
         for (let x = 0; x < COLS; x++) {
-            // Bordes = muro
-            if (y === 0 || y === ROWS - 1 || x === 0 || x === COLS - 1) {
-                mapa[y][x] = 1;
-            }
-            // Pilares en patron de tablero = muro
-            else if (x % 2 === 0 && y % 2 === 0) {
-                mapa[y][x] = 1;
-            }
-            else {
-                mapa[y][x] = 0;
-            }
+            if (y === 0 || y === ROWS - 1 || x === 0 || x === COLS - 1) mapa[y][x] = 1;
+            else if (x % 2 === 0 && y % 2 === 0) mapa[y][x] = 1;
+            else mapa[y][x] = 0;
         }
     }
 
-    // Zonas libres alrededor de los spawns de cada jugador
-    const zonasLibres = [
-        // P1 arriba-izquierda
+    // Zonas de spawn siempre libres
+    const safe = [
         [1, 1], [2, 1], [1, 2],
-        // P2 abajo-derecha
         [COLS - 2, ROWS - 2], [COLS - 3, ROWS - 2], [COLS - 2, ROWS - 3]
     ];
 
-    // Colocar bloques destructibles aleatoriamente (~65%)
+    // Densidad por tipo de mapa
+    const densidades = [0.65, 0.48, 0.78, 0.62, 0.72];
+    const density = densidades[mapType];
+
+    // Zonas despejadas especiales segun mapa
+    const clearSet = new Set();
+
+    if (mapType === 3) {
+        // Bosque: caminos en cruz central
+        for (let y = 1; y < ROWS - 1; y++) if (mapa[y][7] === 0) clearSet.add(`7,${y}`);
+        for (let x = 1; x < COLS - 1; x++) if (mapa[6][x] === 0) clearSet.add(`${x},6`);
+    }
+    if (mapType === 4) {
+        // Templo: corredores horizontales
+        for (let x = 1; x < COLS - 1; x++) {
+            if (mapa[3][x] === 0) clearSet.add(`${x},3`);
+            if (mapa[9][x] === 0) clearSet.add(`${x},9`);
+        }
+    }
+    if (mapType === 1) {
+        // Ruinas: zona central abierta
+        for (let y = 4; y <= 8; y++)
+            for (let x = 5; x <= 9; x++)
+                if (mapa[y][x] === 0) clearSet.add(`${x},${y}`);
+    }
+
+    // Colocar bloques
     for (let y = 1; y < ROWS - 1; y++) {
         for (let x = 1; x < COLS - 1; x++) {
             if (mapa[y][x] !== 0) continue;
-            if (zonasLibres.some(([cx, cy]) => cx === x && cy === y)) continue;
+            if (safe.some(([cx, cy]) => cx === x && cy === y)) continue;
+            if (clearSet.has(`${x},${y}`)) continue;
 
-            if (rand() < 0.65) {
-                mapa[y][x] = 2; // Bloque destructible
-
-                // 30% de probabilidad de tener un power-up escondido
+            if (rand() < density) {
+                mapa[y][x] = 2;
                 if (rand() < 0.30) {
-                    const r = rand();
-                    let tipo;
-                    if (r < 0.30) tipo = 'bomb';
-                    else if (r < 0.60) tipo = 'fire';
-                    else if (r < 0.85) tipo = 'speed';
-                    else tipo = 'kick';
+                    const r2 = rand();
+                    const tipo = r2 < 0.30 ? 'bomb' : r2 < 0.60 ? 'fire' : r2 < 0.85 ? 'speed' : 'kick';
                     powerups[x + ',' + y] = tipo;
                 }
             }
         }
     }
 
-    return { mapa, powerups };
+    return { mapa, powerups, mapType };
 }
 
 // ============================================================
 //  FUNCIONES SUPABASE
 // ============================================================
-async function crearSala(id, nombre, seed) {
+async function crearSala(id, nombre, fullSeed, personaje) {
     const { error } = await sbClient.from('salas').insert({
         id, estado: 'esperando',
-        timer_inicio: seed,  // Guardamos el seed del mapa aqui
-        jugador1: { nombre },
+        timer_inicio: fullSeed,
+        jugador1: { nombre, personaje },
         jugador2: null
     });
     if (error) throw error;
 }
 
-async function unirseASala(id, nombre) {
+async function unirseASala(id, nombre, personaje) {
     const { error } = await sbClient.from('salas').update({
-        jugador2: { nombre },
+        jugador2: { nombre, personaje },
         estado: 'jugando'
     }).eq('id', id);
     if (error) throw error;
 }
 
 async function leerSala(id) {
-    const { data, error } = await sbClient
-        .from('salas').select('*').eq('id', id).single();
+    const { data, error } = await sbClient.from('salas').select('*').eq('id', id).maybeSingle();
     if (error) throw error;
-    return data;
+    return data;  // null si no existe
 }
 
 function escucharSala(id, callback) {
     return sbClient.channel('db_' + id)
-        .on('postgres_changes', {
-            event: '*', schema: 'public', table: 'salas',
-            filter: 'id=eq.' + id
-        }, (payload) => { if (payload.new) callback(payload.new); })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'salas', filter: 'id=eq.' + id },
+            (payload) => { if (payload.new) callback(payload.new); })
         .subscribe();
 }
 
-// Canal Broadcast para sync rapido del juego (sin tocar la DB)
 function crearCanalJuego(idSala) {
-    const canal = sbClient.channel('game_' + idSala, {
-        config: { broadcast: { self: false } }
-    });
+    const canal = sbClient.channel('game_' + idSala, { config: { broadcast: { self: false } } });
     estadoGlobal.canal = canal;
     return canal;
 }
 
 function broadcast(evento, datos) {
-    if (estadoGlobal.canal) {
-        estadoGlobal.canal.send({
-            type: 'broadcast', event: evento, payload: datos
-        });
-    }
+    if (estadoGlobal.canal)
+        estadoGlobal.canal.send({ type: 'broadcast', event: evento, payload: datos });
 }
 
-// ============================================================
-//  UTILIDADES
-// ============================================================
 function generarIdSala() {
     const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let id = '';
@@ -177,184 +219,194 @@ function generarIdSala() {
     return id;
 }
 
-function gridToX(gx) { return GAME_OFFSET_X + gx * TILE + TILE / 2; }
-function gridToY(gy) { return GAME_OFFSET_Y + gy * TILE + TILE / 2; }
-
 // ============================================================
-//  GENERADOR DE TEXTURAS PIXEL ART
-//  Dibuja todos los sprites con Graphics API de Phaser
+//  CHROMA KEY — Elimina fondo verde de sprites
+//  Usa createCanvas + refresh (compatible con WebGL)
 // ============================================================
-function generarTexturas(scene) {
-    const g = scene.make.graphics({ add: false });
+function aplicarChromaKey(scene, sourceKey, destKey) {
+    try {
+        const srcTex = scene.textures.get(sourceKey);
+        // Verificar que la textura cargo correctamente
+        if (!srcTex || srcTex.key === '__MISSING') {
+            console.warn('Textura no encontrada:', sourceKey);
+            return false;
+        }
+        const src = srcTex.getSourceImage();
+        if (!src || src.width === 0) {
+            console.warn('Imagen vacia:', sourceKey);
+            return false;
+        }
 
-    // --- PISO ---
-    g.clear();
-    g.fillStyle(0x3d8b37);
-    g.fillRect(0, 0, TILE, TILE);
-    g.fillStyle(0x2d7a2d);
-    g.fillRect(0, 0, TILE / 2, TILE / 2);
-    g.fillRect(TILE / 2, TILE / 2, TILE / 2, TILE / 2);
-    g.lineStyle(1, 0x4a9e44, 0.3);
-    g.strokeRect(1, 1, TILE - 2, TILE - 2);
-    g.generateTexture('floor', TILE, TILE);
+        // Crear canvas temporal para manipular pixeles
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = src.width;
+        tempCanvas.height = src.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(src, 0, 0);
+        const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            if (g > 80 && g > r * 1.4 && g > b * 1.4 && (g - r) > 40 && (g - b) > 40)
+                d[i + 3] = 0;
+        }
+        tempCtx.putImageData(imgData, 0, 0);
 
-    // --- MURO INDESTRUCTIBLE ---
-    g.clear();
-    g.fillStyle(0x555566);
-    g.fillRect(0, 0, TILE, TILE);
-    // Patron de ladrillos
-    g.fillStyle(0x666677);
-    g.fillRect(2, 2, 20, 10);
-    g.fillRect(26, 2, 20, 10);
-    g.fillRect(14, 16, 20, 10);
-    g.fillRect(2, 30, 20, 10);
-    g.fillRect(26, 30, 20, 10);
-    g.fillRect(14, 16, 20, 10);
-    // Lineas de mortero
-    g.lineStyle(1, 0x444455);
-    g.lineBetween(0, 14, TILE, 14);
-    g.lineBetween(0, 28, TILE, 28);
-    g.lineBetween(0, 42, TILE, 42);
-    g.lineBetween(24, 0, 24, 14);
-    g.lineBetween(12, 14, 12, 28);
-    g.lineBetween(36, 14, 36, 28);
-    g.lineBetween(24, 28, 24, 42);
-    g.lineStyle(2, 0x3d3d4e);
-    g.strokeRect(0, 0, TILE, TILE);
-    g.generateTexture('wall', TILE, TILE);
-
-    // --- BLOQUE DESTRUCTIBLE ---
-    g.clear();
-    g.fillStyle(0xbb8844);
-    g.fillRect(0, 0, TILE, TILE);
-    g.fillStyle(0xcc9955);
-    g.fillRect(3, 3, TILE - 6, TILE - 6);
-    g.fillStyle(0xddaa66);
-    g.fillRect(6, 6, TILE - 12, TILE - 12);
-    // Cruz decorativa
-    g.lineStyle(2, 0xaa7733);
-    g.lineBetween(TILE / 2, 4, TILE / 2, TILE - 4);
-    g.lineBetween(4, TILE / 2, TILE - 4, TILE / 2);
-    g.lineStyle(2, 0x996633);
-    g.strokeRect(0, 0, TILE, TILE);
-    g.generateTexture('block', TILE, TILE);
-
-    // --- BOMBA ---
-    g.clear();
-    g.fillStyle(0x222222);
-    g.fillCircle(TILE / 2, TILE / 2 + 4, 16);
-    g.fillStyle(0x333333);
-    g.fillCircle(TILE / 2, TILE / 2 + 4, 13);
-    // Brillo
-    g.fillStyle(0x666666);
-    g.fillCircle(TILE / 2 - 5, TILE / 2 - 1, 4);
-    // Mecha
-    g.lineStyle(3, 0x886644);
-    g.lineBetween(TILE / 2, TILE / 2 - 10, TILE / 2 + 6, TILE / 2 - 18);
-    // Chispa
-    g.fillStyle(0xff6600);
-    g.fillCircle(TILE / 2 + 6, TILE / 2 - 18, 4);
-    g.fillStyle(0xffcc00);
-    g.fillCircle(TILE / 2 + 6, TILE / 2 - 18, 2);
-    g.generateTexture('bomb', TILE, TILE);
-
-    // --- EXPLOSION CENTRO ---
-    g.clear();
-    g.fillStyle(0xff4400);
-    g.fillRect(4, 4, TILE - 8, TILE - 8);
-    g.fillStyle(0xff8800);
-    g.fillRect(8, 8, TILE - 16, TILE - 16);
-    g.fillStyle(0xffcc00);
-    g.fillRect(14, 14, TILE - 28, TILE - 28);
-    g.fillStyle(0xffffff);
-    g.fillRect(18, 18, TILE - 36, TILE - 36);
-    g.generateTexture('exp_center', TILE, TILE);
-
-    // --- EXPLOSION HORIZONTAL ---
-    g.clear();
-    g.fillStyle(0xff4400);
-    g.fillRect(0, 8, TILE, TILE - 16);
-    g.fillStyle(0xff8800);
-    g.fillRect(0, 12, TILE, TILE - 24);
-    g.fillStyle(0xffcc00);
-    g.fillRect(0, 16, TILE, TILE - 32);
-    g.generateTexture('exp_h', TILE, TILE);
-
-    // --- EXPLOSION VERTICAL ---
-    g.clear();
-    g.fillStyle(0xff4400);
-    g.fillRect(8, 0, TILE - 16, TILE);
-    g.fillStyle(0xff8800);
-    g.fillRect(12, 0, TILE - 24, TILE);
-    g.fillStyle(0xffcc00);
-    g.fillRect(16, 0, TILE - 32, TILE);
-    g.generateTexture('exp_v', TILE, TILE);
-
-    // --- JUGADOR 1 (Blanco/Azul) ---
-    dibujarJugador(g, 0xffffff, 0xeeeeee, 0x4488ff, 'player1');
-
-    // --- JUGADOR 2 (Negro/Rojo) ---
-    dibujarJugador(g, 0x333333, 0x444444, 0xe94560, 'player2');
-
-    // --- POWER-UPS ---
-    dibujarPowerup(g, 0x9944cc, 'B', 'pu_bomb');   // +Bomba
-    dibujarPowerup(g, 0xe94560, 'F', 'pu_fire');    // +Rango
-    dibujarPowerup(g, 0x4488ff, 'S', 'pu_speed');   // +Velocidad
-    dibujarPowerup(g, 0x44bb44, 'K', 'pu_kick');    // Patear
-
-    // --- TUMBA (jugador muerto) ---
-    g.clear();
-    g.fillStyle(0x666666);
-    g.fillRect(16, 20, 16, 24);
-    g.fillRect(10, 20, 28, 6);
-    g.fillStyle(0x888888);
-    g.fillRect(18, 22, 12, 20);
-    g.generateTexture('tumba', TILE, TILE);
-
-    g.destroy();
+        // Usar createCanvas de Phaser (compatible con WebGL)
+        if (scene.textures.exists(destKey)) scene.textures.remove(destKey);
+        const phaserTex = scene.textures.createCanvas(destKey, tempCanvas.width, tempCanvas.height);
+        phaserTex.context.drawImage(tempCanvas, 0, 0);
+        phaserTex.refresh();
+        return true;
+    } catch (e) {
+        console.error('Error chroma key:', sourceKey, e);
+        return false;
+    }
 }
 
-function dibujarJugador(g, colorCuerpo, colorClaro, colorAccento, key) {
+// Verificar si una textura es valida (no es la de "missing")
+function texturaValida(scene, key) {
+    if (!scene.textures.exists(key)) return false;
+    const tex = scene.textures.get(key);
+    return tex && tex.key !== '__MISSING';
+}
+
+// Generar textura de personaje de respaldo (programatica)
+function generarPersonajeFallback(scene, key, colorCuerpo, colorAccento) {
+    const g = scene.make.graphics({ add: false });
+    const T = TILE_BASE;
     g.clear();
     // Cuerpo
     g.fillStyle(colorAccento);
     g.fillRect(12, 22, 24, 18);
     // Cabeza
     g.fillStyle(colorCuerpo);
-    g.fillCircle(TILE / 2, 16, 12);
+    g.fillCircle(T / 2, 16, 12);
     // Ojos
     g.fillStyle(0x000000);
     g.fillRect(18, 12, 4, 5);
     g.fillRect(26, 12, 4, 5);
-    // Pupilas blancas
     g.fillStyle(0xffffff);
     g.fillRect(19, 13, 2, 2);
     g.fillRect(27, 13, 2, 2);
-    // Antena de Bomberman
+    // Antena
     g.fillStyle(colorAccento);
     g.fillRect(22, 0, 4, 8);
-    g.fillCircle(TILE / 2, 2, 4);
+    g.fillCircle(T / 2, 2, 4);
     // Pies
     g.fillStyle(0x222222);
     g.fillRect(14, 40, 8, 6);
     g.fillRect(26, 40, 8, 6);
     // Cinturon
-    g.fillStyle(colorClaro);
+    g.fillStyle(colorCuerpo);
     g.fillRect(12, 30, 24, 3);
-    g.generateTexture(key, TILE, TILE);
+    g.generateTexture(key, T, T);
+    g.destroy();
 }
 
-function dibujarPowerup(g, color, letra, key) {
+// Colores fallback para los 4 personajes
+const CHAR_FALLBACK_COLORS = [
+    { cuerpo: 0xe94560, accento: 0xcc2244 },  // Bomber (rojo)
+    { cuerpo: 0x333333, accento: 0xcc44ff },  // Dark (morado)
+    { cuerpo: 0xffcc00, accento: 0xdd9900 },  // Astro (amarillo)
+    { cuerpo: 0xffffff, accento: 0x4488ff },  // Classic (azul)
+];
+
+// ============================================================
+//  TEXTURAS PIXEL ART PROGRAMATICAS
+// ============================================================
+function generarTexturas(scene) {
+    const g = scene.make.graphics({ add: false });
+    const T = TILE_BASE;
+
+    // PISO
     g.clear();
-    // Fondo con brillo
-    g.fillStyle(0x000000);
-    g.fillRect(4, 4, TILE - 8, TILE - 8);
-    g.fillStyle(color);
-    g.fillRect(6, 6, TILE - 12, TILE - 12);
-    g.fillStyle(0xffffff, 0.3);
-    g.fillRect(8, 8, TILE - 16, 10);
-    g.generateTexture(key, TILE, TILE);
-    // Nota: la letra la pondremos como texto Phaser encima
+    g.fillStyle(0x3d8b37); g.fillRect(0, 0, T, T);
+    g.fillStyle(0x2d7a2d); g.fillRect(0, 0, T / 2, T / 2); g.fillRect(T / 2, T / 2, T / 2, T / 2);
+    g.lineStyle(1, 0x4a9e44, 0.3); g.strokeRect(1, 1, T - 2, T - 2);
+    g.generateTexture('floor', T, T);
+
+    // MURO
+    g.clear();
+    g.fillStyle(0x555566); g.fillRect(0, 0, T, T);
+    g.fillStyle(0x666677);
+    g.fillRect(2, 2, 20, 10); g.fillRect(26, 2, 20, 10);
+    g.fillRect(14, 16, 20, 10); g.fillRect(2, 30, 20, 10); g.fillRect(26, 30, 20, 10);
+    g.lineStyle(1, 0x444455);
+    g.lineBetween(0, 14, T, 14); g.lineBetween(0, 28, T, 28); g.lineBetween(0, 42, T, 42);
+    g.lineBetween(24, 0, 24, 14); g.lineBetween(12, 14, 12, 28); g.lineBetween(36, 14, 36, 28);
+    g.lineStyle(2, 0x3d3d4e); g.strokeRect(0, 0, T, T);
+    g.generateTexture('wall', T, T);
+
+    // BLOQUE
+    g.clear();
+    g.fillStyle(0xbb8844); g.fillRect(0, 0, T, T);
+    g.fillStyle(0xcc9955); g.fillRect(3, 3, T - 6, T - 6);
+    g.fillStyle(0xddaa66); g.fillRect(6, 6, T - 12, T - 12);
+    g.lineStyle(2, 0xaa7733); g.lineBetween(T / 2, 4, T / 2, T - 4); g.lineBetween(4, T / 2, T - 4, T / 2);
+    g.lineStyle(2, 0x996633); g.strokeRect(0, 0, T, T);
+    g.generateTexture('block', T, T);
+
+    // BOMBA
+    g.clear();
+    g.fillStyle(0x222222); g.fillCircle(T / 2, T / 2 + 4, 16);
+    g.fillStyle(0x333333); g.fillCircle(T / 2, T / 2 + 4, 13);
+    g.fillStyle(0x666666); g.fillCircle(T / 2 - 5, T / 2 - 1, 4);
+    g.lineStyle(3, 0x886644); g.lineBetween(T / 2, T / 2 - 10, T / 2 + 6, T / 2 - 18);
+    g.fillStyle(0xff6600); g.fillCircle(T / 2 + 6, T / 2 - 18, 4);
+    g.fillStyle(0xffcc00); g.fillCircle(T / 2 + 6, T / 2 - 18, 2);
+    g.generateTexture('bomb', T, T);
+
+    // EXPLOSION CENTRO
+    g.clear();
+    g.fillStyle(0xff4400); g.fillRect(4, 4, T - 8, T - 8);
+    g.fillStyle(0xff8800); g.fillRect(8, 8, T - 16, T - 16);
+    g.fillStyle(0xffcc00); g.fillRect(14, 14, T - 28, T - 28);
+    g.fillStyle(0xffffff); g.fillRect(18, 18, T - 36, T - 36);
+    g.generateTexture('exp_center', T, T);
+
+    // EXPLOSION HORIZONTAL
+    g.clear();
+    g.fillStyle(0xff4400); g.fillRect(0, 8, T, T - 16);
+    g.fillStyle(0xff8800); g.fillRect(0, 12, T, T - 24);
+    g.fillStyle(0xffcc00); g.fillRect(0, 16, T, T - 32);
+    g.generateTexture('exp_h', T, T);
+
+    // EXPLOSION VERTICAL
+    g.clear();
+    g.fillStyle(0xff4400); g.fillRect(8, 0, T - 16, T);
+    g.fillStyle(0xff8800); g.fillRect(12, 0, T - 24, T);
+    g.fillStyle(0xffcc00); g.fillRect(16, 0, T - 32, T);
+    g.generateTexture('exp_v', T, T);
+
+    // POWER-UPS
+    dibujarPowerup(g, 0x9944cc, 'pu_bomb');
+    dibujarPowerup(g, 0xe94560, 'pu_fire');
+    dibujarPowerup(g, 0x4488ff, 'pu_speed');
+    dibujarPowerup(g, 0x44bb44, 'pu_kick');
+
+    // TUMBA
+    g.clear();
+    g.fillStyle(0x666666); g.fillRect(16, 20, 16, 24); g.fillRect(10, 20, 28, 6);
+    g.fillStyle(0x888888); g.fillRect(18, 22, 12, 20);
+    g.generateTexture('tumba', T, T);
+
+    // BORDE SELECCION
+    g.clear();
+    g.lineStyle(4, 0xffcc00); g.strokeRect(2, 2, T - 4, T - 4);
+    g.lineStyle(2, 0xff8800); g.strokeRect(6, 6, T - 12, T - 12);
+    g.generateTexture('sel_border', T, T);
+
+    g.destroy();
+}
+
+function dibujarPowerup(g, color, key) {
+    const T = TILE_BASE;
+    g.clear();
+    g.fillStyle(0x000000); g.fillRect(4, 4, T - 8, T - 8);
+    g.fillStyle(color); g.fillRect(6, 6, T - 12, T - 12);
+    g.fillStyle(0xffffff, 0.3); g.fillRect(8, 8, T - 16, 10);
+    g.generateTexture(key, T, T);
 }
 
 // ============================================================
@@ -363,93 +415,212 @@ function dibujarPowerup(g, color, letra, key) {
 class SceneMenu extends Phaser.Scene {
     constructor() { super({ key: 'SceneMenu' }); }
 
+    preload() {
+        this.load.image('char0_raw', 'assets/personajes/char0.png');
+        this.load.image('char1_raw', 'assets/personajes/char1.png');
+        this.load.image('char2_raw', 'assets/personajes/char2.png');
+        this.load.image('char3_raw', 'assets/personajes/char3.png');
+        this.load.image('map0', 'assets/mapas/map0.png');
+        this.load.image('map1', 'assets/mapas/map1.png');
+        this.load.image('map2', 'assets/mapas/map2.png');
+        this.load.image('map3', 'assets/mapas/map3.png');
+        this.load.image('map4', 'assets/mapas/map4.png');
+    }
+
     create() {
         document.getElementById('loading-screen').style.display = 'none';
+
         generarTexturas(this);
 
-        const W = 1280, H = 720;
+        // Desactivar captura global de teclado para que los inputs HTML funcionen
+        this.input.keyboard.disableGlobalCapture();
 
-        // Fondo con patron de piso
-        for (let y = 0; y < Math.ceil(H / TILE); y++) {
-            for (let x = 0; x < Math.ceil(W / TILE); x++) {
-                this.add.image(x * TILE + TILE / 2, y * TILE + TILE / 2, 'floor').setAlpha(0.3);
-                if ((x + y) % 5 === 0 && Math.random() > 0.7) {
-                    this.add.image(x * TILE + TILE / 2, y * TILE + TILE / 2, 'wall').setAlpha(0.15);
-                }
+        // Aplicar chroma key a personajes; si falla, usar textura de respaldo
+        for (let i = 0; i < 4; i++) {
+            const ok = aplicarChromaKey(this, `char${i}_raw`, `char${i}`);
+            if (!ok) {
+                const c = CHAR_FALLBACK_COLORS[i];
+                generarPersonajeFallback(this, `char${i}`, c.cuerpo, c.accento);
+                console.log(`Personaje ${i}: usando sprite de respaldo`);
             }
         }
 
-        // Titulo
-        this.add.text(W / 2, 80, 'BOMBERMAN', {
-            fontSize: '64px', fontFamily: 'Arial Black',
-            color: '#e94560', stroke: '#000000', strokeThickness: 8
+        // Verificar que los mapas cargaron; si no, generar respaldo
+        for (let i = 0; i < 5; i++) {
+            if (!texturaValida(this, `map${i}`)) {
+                // Generar miniatura de mapa programatica
+                const g = this.make.graphics({ add: false });
+                const colores = [0x3d8b37, 0x8b7355, 0x2d2d3d, 0x1a3320, 0x6b7355];
+                g.fillStyle(colores[i]); g.fillRect(0, 0, 100, 75);
+                g.fillStyle(0x555566); g.fillRect(10, 10, 80, 55);
+                g.fillStyle(colores[i]); g.fillRect(15, 15, 70, 45);
+                g.generateTexture(`map${i}`, 100, 75);
+                g.destroy();
+                console.log(`Mapa ${i}: usando miniatura de respaldo`);
+            }
+        }
+
+        const W = this.scale.width, H = this.scale.height;
+        const small = W < 600;
+
+        // FONDO
+        this.add.rectangle(W / 2, H / 2, W, H, 0x16213e);
+        for (let y = 0; y < Math.ceil(H / 48) + 1; y++)
+            for (let x = 0; x < Math.ceil(W / 48) + 1; x++)
+                this.add.image(x * 48 + 24, y * 48 + 24, 'floor').setAlpha(0.12);
+
+        // TITULO
+        const titleY = small ? H * 0.07 : 52;
+        this.add.text(W / 2, titleY, 'BOMBERMAN', {
+            fontSize: small ? '34px' : '52px', fontFamily: 'Arial Black',
+            color: '#e94560', stroke: '#000000', strokeThickness: 7
+        }).setOrigin(0.5);
+        this.add.text(W / 2, titleY + (small ? 32 : 42), '1 v 1  O N L I N E', {
+            fontSize: small ? '12px' : '17px', color: '#ffcc44',
+            fontFamily: 'Courier New', letterSpacing: 3
         }).setOrigin(0.5);
 
-        this.add.text(W / 2, 130, '1 v 1  O N L I N E', {
-            fontSize: '22px', color: '#ffcc44',
-            fontFamily: 'Courier New', letterSpacing: 4
+        // SELECCION DE PERSONAJE
+        const charLabelY = small ? H * 0.20 : 148;
+        this.add.text(W / 2, charLabelY, 'Elige tu personaje:', {
+            fontSize: small ? '11px' : '13px', color: '#aabbcc'
         }).setOrigin(0.5);
 
-        // Jugadores decorativos
-        const p1 = this.add.image(W / 2 - 200, 350, 'player1').setScale(2.5);
-        const p2 = this.add.image(W / 2 + 200, 350, 'player2').setScale(2.5);
-        this.add.image(W / 2, 350, 'bomb').setScale(2);
-        this.tweens.add({ targets: p1, y: p1.y - 10, duration: 800, yoyo: true, repeat: -1 });
-        this.tweens.add({ targets: p2, y: p2.y - 10, duration: 800, yoyo: true, repeat: -1, delay: 400 });
+        const charSize = small ? Math.floor(W * 0.16) : 70;
+        const charGap = small ? 6 : 8;
+        const totalCharW = 4 * charSize + 3 * charGap;
+        const charStartX = W / 2 - totalCharW / 2 + charSize / 2;
+        const charRowY = charLabelY + 14 + charSize / 2;
 
-        // --- NOMBRE ---
-        this.add.text(W / 2, 190, 'Tu nombre:', { fontSize: '16px', color: '#aabbcc' }).setOrigin(0.5);
-        this.inputNombre = this.crearInput(W / 2 - 100, 208, 200, 'Bomber');
+        this.charBorders = [];
+        for (let i = 0; i < 4; i++) {
+            const cx = charStartX + i * (charSize + charGap);
 
-        // --- CREAR SALA ---
-        this.add.text(W / 2, 440, '- Crear Sala -', { fontSize: '14px', color: '#667788' }).setOrigin(0.5);
-        this.crearBoton(W / 2, 480, 'CREAR SALA', 0xaa2244, () => this.accionCrear());
+            const bg = this.add.rectangle(cx, charRowY, charSize, charSize, 0x0f3460, 0.85)
+                .setStrokeStyle(1, 0x1a5080).setInteractive({ useHandCursor: true });
 
-        this.textoIdSala = this.add.text(W / 2, 525, '', {
-            fontSize: '32px', color: '#ffcc44', fontFamily: 'Courier New',
-            stroke: '#000', strokeThickness: 4
+            this.add.image(cx, charRowY, `char${i}`).setDisplaySize(charSize, charSize);
+
+            this.add.text(cx, charRowY + charSize / 2 + 4, PERSONAJES[i].nombre, {
+                fontSize: small ? '8px' : '10px', color: PERSONAJES[i].color, fontFamily: 'Arial Black'
+            }).setOrigin(0.5);
+
+            const border = this.add.image(cx, charRowY, 'sel_border')
+                .setDisplaySize(charSize, charSize).setAlpha(i === 0 ? 1 : 0);
+            this.charBorders.push(border);
+
+            bg.on('pointerdown', () => this.seleccionarPersonaje(i));
+        }
+
+        // SELECCION DE MAPA
+        const mapLabelY = small ? H * 0.46 : 282;
+        this.add.text(W / 2, mapLabelY, 'Selecciona el mapa:', {
+            fontSize: small ? '11px' : '13px', color: '#aabbcc'
         }).setOrigin(0.5);
-        this.textoEspera = this.add.text(W / 2, 555, '', {
-            fontSize: '13px', color: '#88aacc'
+
+        const mapW = small ? Math.floor((W - 36) / 5) - 4 : 68;
+        const mapH = Math.round(mapW * 0.75);
+        const mapGap = 4;
+        const totalMapW = 5 * mapW + 4 * mapGap;
+        const mapStartX = W / 2 - totalMapW / 2 + mapW / 2;
+        const mapRowY = mapLabelY + 14 + mapH / 2;
+
+        this.mapBorders = [];
+        for (let i = 0; i < 5; i++) {
+            const mx = mapStartX + i * (mapW + mapGap);
+
+            this.add.image(mx, mapRowY, `map${i}`).setDisplaySize(mapW, mapH);
+
+            this.add.text(mx, mapRowY + mapH / 2 + 3, MAPAS_NOMBRES[i], {
+                fontSize: small ? '7px' : '9px', color: '#aabbcc'
+            }).setOrigin(0.5);
+
+            const mbg = this.add.rectangle(mx, mapRowY, mapW, mapH, 0, 0)
+                .setStrokeStyle(i === 0 ? 2 : 0, 0xffcc00)
+                .setInteractive({ useHandCursor: true });
+            this.mapBorders.push(mbg);
+            mbg.on('pointerdown', () => this.seleccionarMapa(i));
+        }
+
+        // NOMBRE
+        const nameY = small ? H * 0.645 : 374;
+        this.add.text(W / 2, nameY - 15, 'Tu nombre:', {
+            fontSize: small ? '11px' : '13px', color: '#aabbcc'
+        }).setOrigin(0.5);
+        this.inputNombre = this.crearInput(W / 2 - (small ? 65 : 88), nameY, small ? 130 : 176, 'Bomber');
+
+        // BOTONES
+        const btnY = small ? H * 0.735 : 422;
+        const btnW = small ? 108 : 148;
+        const btnGap = small ? 62 : 82;
+        this.crearBoton(W / 2 - btnGap, btnY, btnW, 'CREAR SALA', 0xaa2244, () => this.accionCrear());
+        this.crearBoton(W / 2 + btnGap, btnY, btnW, 'UNIRSE', 0x226644, () => this.accionUnirse());
+
+        // Codigo sala generado al crear
+        this.textoIdSala = this.add.text(W / 2, btnY + 30, '', {
+            fontSize: small ? '26px' : '32px', color: '#ffcc44',
+            fontFamily: 'Courier New', stroke: '#000', strokeThickness: 4
         }).setOrigin(0.5);
 
-        // --- UNIRSE ---
-        this.add.text(W / 2, 590, '- O Unirse -', { fontSize: '14px', color: '#667788' }).setOrigin(0.5);
-        this.inputSala = this.crearInput(W / 2 - 80, 610, 160, 'ABCDE');
-        this.crearBoton(W / 2, 665, 'UNIRSE', 0x226644, () => this.accionUnirse());
+        // Input codigo sala para unirse
+        const joinY = small ? H * 0.825 : 490;
+        this.add.text(W / 2, joinY - 14, 'Codigo para unirse:', {
+            fontSize: small ? '10px' : '12px', color: '#667788'
+        }).setOrigin(0.5);
+        this.inputSala = this.crearInput(W / 2 - (small ? 44 : 56), joinY, small ? 88 : 112, 'ABCDE');
+        this.inputSala.style.textTransform = 'uppercase';
 
         // Estado
-        this.textoEstado = this.add.text(W / 2, 705, '', {
-            fontSize: '13px', color: '#ff6644'
+        const estadoY = small ? H * 0.905 : 545;
+        this.textoEstado = this.add.text(W / 2, estadoY, '', {
+            fontSize: small ? '11px' : '13px', color: '#ff6644'
         }).setOrigin(0.5);
+        this.textoEspera = this.add.text(W / 2, estadoY + 18, '', {
+            fontSize: small ? '10px' : '12px', color: '#88aacc'
+        }).setOrigin(0.5);
+
+        // Inicializar seleccion
+        estadoGlobal.personaje = 0;
+        estadoGlobal.selectedMap = 0;
+    }
+
+    seleccionarPersonaje(i) {
+        estadoGlobal.personaje = i;
+        this.charBorders.forEach((b, idx) => b.setAlpha(idx === i ? 1 : 0));
+    }
+
+    seleccionarMapa(i) {
+        estadoGlobal.selectedMap = i;
+        this.mapBorders.forEach((b, idx) => b.setStrokeStyle(idx === i ? 2 : 0, 0xffcc00));
     }
 
     crearInput(x, y, w, placeholder) {
         const inp = document.createElement('input');
         inp.type = 'text'; inp.placeholder = placeholder;
         const rect = this.game.canvas.getBoundingClientRect();
-        const scaleX = rect.width / 1280;
-        const scaleY = rect.height / 720;
-        const scaledW = Math.round(w * scaleX);
-        const scaledH = Math.round(30 * scaleY);
-        const scaledFont = Math.round(15 * Math.min(scaleX, scaleY));
-        const posLeft = Math.round(rect.left + window.scrollX + x * scaleX);
-        const posTop = Math.round(rect.top + window.scrollY + y * scaleY);
-        inp.style.cssText = `position:absolute;left:${posLeft}px;top:${posTop}px;
-            width:${scaledW}px;height:${scaledH}px;font-size:${scaledFont}px;
-            text-align:center;background:#16213e;color:#e94560;border:2px solid #0f3460;
-            border-radius:4px;outline:none;font-family:Courier New,monospace;z-index:100;`;
+        const scaleX = rect.width / SCREEN_W;
+        const scaleY = rect.height / SCREEN_H;
+        inp.style.cssText = `
+            position:absolute;
+            left:${Math.round(rect.left + window.scrollX + x * scaleX)}px;
+            top:${Math.round(rect.top + window.scrollY + y * scaleY)}px;
+            width:${Math.round(w * scaleX)}px;
+            height:${Math.round(28 * scaleY)}px;
+            font-size:${Math.round(14 * Math.min(scaleX, scaleY))}px;
+            text-align:center;background:#16213e;color:#e94560;
+            border:2px solid #0f3460;border-radius:4px;outline:none;
+            font-family:Courier New,monospace;z-index:100;`;
         document.body.appendChild(inp);
         if (!this._inputs) this._inputs = [];
         this._inputs.push(inp);
         return inp;
     }
 
-    crearBoton(x, y, texto, color, cb) {
-        const btn = this.add.rectangle(x, y, 200, 40, color, 0.9)
+    crearBoton(x, y, w, texto, color, cb) {
+        const btn = this.add.rectangle(x, y, w, 36, color, 0.9)
             .setInteractive({ useHandCursor: true }).setStrokeStyle(2, 0xffffff);
         const lbl = this.add.text(x, y, texto, {
-            fontSize: '16px', fontFamily: 'Arial Black', color: '#fff'
+            fontSize: '13px', fontFamily: 'Arial Black', color: '#fff'
         }).setOrigin(0.5);
         btn.on('pointerover', () => { btn.setScale(1.05); lbl.setScale(1.05); });
         btn.on('pointerout', () => { btn.setScale(1); lbl.setScale(1); });
@@ -464,22 +635,33 @@ class SceneMenu extends Phaser.Scene {
     async accionCrear() {
         const nombre = this.inputNombre.value.trim() || 'Jugador1';
         const id = generarIdSala();
-        const seed = Date.now(); // Seed para generar el mapa
-        estadoGlobal = { idSala: id, nombreJugador: nombre, numJugador: 1, canal: null };
+        // fullSeed = timestamp * 10 + mapType (0-4)
+        const fullSeed = Date.now() * 10 + estadoGlobal.selectedMap;
+        estadoGlobal = { ...estadoGlobal, idSala: id, nombreJugador: nombre, numJugador: 1, canal: null };
         this.textoEstado.setText('Creando...').setColor('#88aacc');
 
         try {
-            await crearSala(id, nombre, seed);
+            await crearSala(id, nombre, fullSeed, estadoGlobal.personaje);
             this.textoIdSala.setText(id);
-            this.textoEspera.setText('Comparte este codigo con tu rival...');
+            this.textoEspera.setText('Comparte este codigo!');
             this.textoEstado.setText('');
 
             escucharSala(id, (datos) => {
                 if (datos.estado === 'jugando' && datos.jugador2) {
+                    let rivalPersonaje = datos.jugador2.personaje ?? 0;
+                    // Si el rival eligio el mismo personaje, asignarle el siguiente
+                    if (rivalPersonaje === estadoGlobal.personaje) {
+                        rivalPersonaje = (rivalPersonaje + 1) % 4;
+                    }
+                    estadoGlobal.personajeRival = rivalPersonaje;
                     this.textoEspera.setText('Rival: ' + datos.jugador2.nombre + ' - Iniciando!');
                     this.time.delayedCall(1000, () => {
                         this.limpiarInputs();
-                        this.scene.start('SceneGame', { seed });
+                        this.scene.start('SceneGame', {
+                            seed: fullSeed,
+                            miPersonaje: estadoGlobal.personaje,
+                            rivalPersonaje
+                        });
                     });
                 }
             });
@@ -499,15 +681,24 @@ class SceneMenu extends Phaser.Scene {
             if (!datos) { this.textoEstado.setText('Sala no encontrada').setColor('#ff4444'); return; }
             if (datos.jugador2) { this.textoEstado.setText('Sala llena').setColor('#ff4444'); return; }
 
-            // Leer el seed guardado en la sala (timer_inicio)
-            const seed = datos.timer_inicio;
+            const fullSeed = datos.timer_inicio;
+            let rivalPersonaje = datos.jugador1?.personaje ?? 0;
+            // Si el rival eligio el mismo personaje, auto-cambiar el mio
+            if (rivalPersonaje === estadoGlobal.personaje) {
+                estadoGlobal.personaje = (estadoGlobal.personaje + 2) % 4;
+            }
+            estadoGlobal = { ...estadoGlobal, idSala: id, nombreJugador: nombre, numJugador: 2, canal: null };
+            estadoGlobal.personajeRival = rivalPersonaje;
 
-            estadoGlobal = { idSala: id, nombreJugador: nombre, numJugador: 2, canal: null };
-            await unirseASala(id, nombre);
+            await unirseASala(id, nombre, estadoGlobal.personaje);
             this.textoEstado.setText('Conectado! Iniciando...');
             this.time.delayedCall(800, () => {
                 this.limpiarInputs();
-                this.scene.start('SceneGame', { seed });
+                this.scene.start('SceneGame', {
+                    seed: fullSeed,
+                    miPersonaje: estadoGlobal.personaje,
+                    rivalPersonaje
+                });
             });
         } catch (e) {
             this.textoEstado.setText('Error: ' + (e.message || e)).setColor('#ff4444');
@@ -516,19 +707,22 @@ class SceneMenu extends Phaser.Scene {
 }
 
 // ============================================================
-//  ESCENA: JUEGO PRINCIPAL (Bomberman)
+//  ESCENA: JUEGO PRINCIPAL
 // ============================================================
 class SceneGame extends Phaser.Scene {
     constructor() { super({ key: 'SceneGame' }); }
 
     init(data) {
         this.seedInicial = data.seed || null;
+        this.miPersonaje = data.miPersonaje ?? 0;
+        this.rivalPersonaje = data.rivalPersonaje ?? 0;
     }
 
     create() {
-        const W = 1280, H = 720;
+        const W = this.scale.width, H = this.scale.height;
+        this.L = calcLayout(W, H);
 
-        // --- Variables del juego ---
+        // Variables del juego
         this.mapa = null;
         this.powerupsData = {};
         this.tileSprites = [];
@@ -538,95 +732,105 @@ class SceneGame extends Phaser.Scene {
         this.juegoActivo = false;
         this.syncTimer = 0;
         this.kickedBombs = [];
+        this.mapType = 0;
 
         // Jugador local
         this.local = {
-            gridX: 1, gridY: 1, // P1 default
+            gridX: 1, gridY: 1,
             pixelX: 0, pixelY: 0,
             moving: false, targetX: 0, targetY: 0,
-            dir: 'down',
-            speed: BASE_SPEED,
+            dir: 'down', speed: BASE_SPEED,
             maxBombs: 1, bombsOut: 0,
-            fireRange: 1,
-            hasKick: false,
-            alive: true
+            fireRange: 1, hasKick: false, alive: true
         };
 
         // Jugador remoto
         this.remoto = {
-            gridX: COLS - 2, gridY: ROWS - 2, // P2 default
-            pixelX: 0, pixelY: 0,
-            dir: 'down', alive: true,
+            gridX: COLS - 2, gridY: ROWS - 2,
+            pixelX: 0, pixelY: 0, dir: 'down', alive: true,
             speed: BASE_SPEED, maxBombs: 1, fireRange: 1, hasKick: false, bombsOut: 0
         };
 
-        // Asignar posiciones segun numero de jugador
         if (estadoGlobal.numJugador === 2) {
-            this.local.gridX = COLS - 2;
-            this.local.gridY = ROWS - 2;
-            this.remoto.gridX = 1;
-            this.remoto.gridY = 1;
+            this.local.gridX = COLS - 2; this.local.gridY = ROWS - 2;
+            this.remoto.gridX = 1; this.remoto.gridY = 1;
         }
 
-        this.local.pixelX = gridToX(this.local.gridX);
-        this.local.pixelY = gridToY(this.local.gridY);
-        this.remoto.pixelX = gridToX(this.remoto.gridX);
-        this.remoto.pixelY = gridToY(this.remoto.gridY);
+        this.local.pixelX = this.gx(this.local.gridX);
+        this.local.pixelY = this.gy(this.local.gridY);
+        this.remoto.pixelX = this.gx(this.remoto.gridX);
+        this.remoto.pixelY = this.gy(this.remoto.gridY);
 
-        // --- Fondo oscuro ---
-        this.add.rectangle(W / 2, H / 2, W, H, 0x16213e);
+        // Fondo
+        this.add.rectangle(W / 2, H / 2, W, H, 0x1a1a2e);
+
+        // UI
+        this.construirUI();
+
+        // Teclado — reactivar captura (fue desactivada en menu para los inputs)
+        this.input.keyboard.enableGlobalCapture();
+        this.cursors = this.input.keyboard.createCursorKeys();
+        this.keys = this.input.keyboard.addKeys({
+            W: Phaser.Input.Keyboard.KeyCodes.W, A: Phaser.Input.Keyboard.KeyCodes.A,
+            S: Phaser.Input.Keyboard.KeyCodes.S, D: Phaser.Input.Keyboard.KeyCodes.D,
+            SPACE: Phaser.Input.Keyboard.KeyCodes.SPACE
+        });
+
+        // Controles tactiles
+        this.touchDir = null;
+        this.touchBomb = false;
+        if (ES_MOVIL) this.crearControlesTactiles();
+
+        this.iniciarConSeed(this.seedInicial);
+        this.conectarCanal();
+    }
+
+    gx(col) { return this.L.offX + col * this.L.tile + this.L.tile / 2; }
+    gy(row) { return this.L.offY + row * this.L.tile + this.L.tile / 2; }
+
+    // ========== UI ==========
+    construirUI() {
+        const { W, H, offX, offY, tile } = this.L;
 
         if (!ES_MOVIL) {
-            // --- Panel izquierdo (stats) - SOLO DESKTOP ---
+            // Panel izquierdo desktop
             this.add.rectangle(140, H / 2, 260, H - 20, 0x0f3460, 0.5).setStrokeStyle(1, 0x1a3a5c);
-            this.add.text(140, 30, 'BOMBERMAN 1v1', {
-                fontSize: '18px', fontFamily: 'Arial Black', color: '#e94560'
+            this.add.text(140, 28, 'BOMBERMAN 1v1', {
+                fontSize: '17px', fontFamily: 'Arial Black', color: '#e94560'
             }).setOrigin(0.5);
 
-            const p1Color = estadoGlobal.numJugador === 1 ? '#4488ff' : '#e94560';
-            const p2Color = estadoGlobal.numJugador === 1 ? '#e94560' : '#4488ff';
+            const p1Char = estadoGlobal.numJugador === 1 ? this.miPersonaje : this.rivalPersonaje;
+            const p2Char = estadoGlobal.numJugador === 1 ? this.rivalPersonaje : this.miPersonaje;
             const p1Label = estadoGlobal.numJugador === 1 ? 'TU' : 'RIVAL';
             const p2Label = estadoGlobal.numJugador === 1 ? 'RIVAL' : 'TU';
 
-            this.add.image(60, 80, 'player1').setScale(0.8);
-            this.add.text(90, 75, p1Label, { fontSize: '14px', color: p1Color, fontFamily: 'Arial Black' });
-            this.textoStatsP1 = this.add.text(40, 110, '', { fontSize: '11px', color: '#aabbcc', lineSpacing: 3 });
+            this.add.image(58, 82, `char${p1Char}`).setDisplaySize(46, 46);
+            this.add.text(90, 73, p1Label, { fontSize: '13px', color: '#4488ff', fontFamily: 'Arial Black' });
+            this.textoStatsP1 = this.add.text(36, 108, '', { fontSize: '11px', color: '#aabbcc', lineSpacing: 3 });
 
-            this.add.image(60, 200, 'player2').setScale(0.8);
-            this.add.text(90, 195, p2Label, { fontSize: '14px', color: p2Color, fontFamily: 'Arial Black' });
-            this.textoStatsP2 = this.add.text(40, 230, '', { fontSize: '11px', color: '#aabbcc', lineSpacing: 3 });
+            this.add.image(58, 198, `char${p2Char}`).setDisplaySize(46, 46);
+            this.add.text(90, 189, p2Label, { fontSize: '13px', color: '#e94560', fontFamily: 'Arial Black' });
+            this.textoStatsP2 = this.add.text(36, 224, '', { fontSize: '11px', color: '#aabbcc', lineSpacing: 3 });
 
-            this.add.text(140, 360, 'CONTROLES', {
-                fontSize: '13px', color: '#667788', fontFamily: 'Arial Black'
-            }).setOrigin(0.5);
-            this.add.text(30, 385, [
-                'WASD / Flechas = Mover',
-                'ESPACIO = Bomba',
-                '',
-                'Power-ups:',
-                'B = +1 Bomba',
-                'F = +1 Rango fuego',
-                'S = +Velocidad',
-                'K = Patear bombas'
-            ].join('\n'), { fontSize: '11px', color: '#556677', lineSpacing: 4 });
+            this.add.text(140, 338, 'CONTROLES', { fontSize: '12px', color: '#667788', fontFamily: 'Arial Black' }).setOrigin(0.5);
+            this.add.text(26, 356, 'WASD / Flechas = Mover\nESPACIO = Bomba\n\nPower-ups:\nB=+Bomba  F=+Fuego\nS=+Vel    K=Patear',
+                { fontSize: '11px', color: '#556677', lineSpacing: 5 });
 
-            this.textoEstadoJuego = this.add.text(140, 560, 'Conectando...', {
-                fontSize: '14px', color: '#ffcc44'
+            this.textoEstadoJuego = this.add.text(140, 525, 'Conectando...', {
+                fontSize: '13px', color: '#ffcc44'
             }).setOrigin(0.5);
         } else {
-            // --- MOVIL: Mini HUD compacto superpuesto ---
-            this.textoStatsP1 = this.add.text(0, 0, '', { fontSize: '1px', color: '#000' }).setVisible(false);
-            this.textoStatsP2 = this.add.text(0, 0, '', { fontSize: '1px', color: '#000' }).setVisible(false);
+            // Mini HUD mobile — barra superior
+            this.textoStatsP1 = this.add.text(0, 0, '', { fontSize: '1px' }).setVisible(false);
+            this.textoStatsP2 = this.add.text(0, 0, '', { fontSize: '1px' }).setVisible(false);
 
-            // Barra superior con info minima
-            this.add.rectangle(W / 2, 8, W, 16, 0x000000, 0.6).setDepth(150);
-            const miColor = estadoGlobal.numJugador === 1 ? '#4488ff' : '#e94560';
-            const rivColor = estadoGlobal.numJugador === 1 ? '#e94560' : '#4488ff';
-            this.mobileStatsLocal = this.add.text(10, 2, '', {
-                fontSize: '10px', color: miColor, fontFamily: 'Arial Black'
+            this.add.rectangle(W / 2, 10, W, 20, 0x000000, 0.7).setDepth(150);
+
+            this.mobileHudLocal = this.add.text(6, 2, '', {
+                fontSize: '10px', color: PERSONAJES[this.miPersonaje].color, fontFamily: 'Arial Black'
             }).setDepth(151);
-            this.mobileStatsRemoto = this.add.text(W - 10, 2, '', {
-                fontSize: '10px', color: rivColor, fontFamily: 'Arial Black'
+            this.mobileHudRemoto = this.add.text(W - 6, 2, '', {
+                fontSize: '10px', color: PERSONAJES[this.rivalPersonaje].color, fontFamily: 'Arial Black'
             }).setOrigin(1, 0).setDepth(151);
 
             this.textoEstadoJuego = this.add.text(W / 2, 2, 'Conectando...', {
@@ -634,218 +838,173 @@ class SceneGame extends Phaser.Scene {
             }).setOrigin(0.5, 0).setDepth(151);
         }
 
-        this.textoCuenta = this.add.text(W / 2, H / 2, '', {
-            fontSize: '96px', fontFamily: 'Arial Black',
+        // Cuenta regresiva centrada sobre el mapa
+        const mapCX = this.L.offX + COLS * this.L.tile / 2;
+        const mapCY = this.L.offY + ROWS * this.L.tile / 2;
+        this.textoCuenta = this.add.text(mapCX, mapCY, '', {
+            fontSize: ES_MOVIL ? '64px' : '96px', fontFamily: 'Arial Black',
             color: '#ffffff', stroke: '#000000', strokeThickness: 10
         }).setOrigin(0.5).setDepth(100);
+    }
 
-        // --- Teclado ---
-        this.cursors = this.input.keyboard.createCursorKeys();
-        this.keys = this.input.keyboard.addKeys({
-            W: Phaser.Input.Keyboard.KeyCodes.W,
-            A: Phaser.Input.Keyboard.KeyCodes.A,
-            S: Phaser.Input.Keyboard.KeyCodes.S,
-            D: Phaser.Input.Keyboard.KeyCodes.D,
-            SPACE: Phaser.Input.Keyboard.KeyCodes.SPACE
-        });
+    // ========== CONTROLES TACTILES ==========
+    crearControlesTactiles() {
+        const { W, H, offX, offY, tile } = this.L;
+        const depth = 200, alpha = 0.45;
+        const gridRight = offX + COLS * tile;
+        const gridBottom = offY + ROWS * tile;
 
-        // --- Controles tactiles para movil ---
-        this.esTactil = ES_MOVIL || !this.sys.game.device.os.desktop;
-        this.touchDir = null;   // Direccion actual del D-pad
-        this.touchBomb = false; // Boton bomba presionado
-        if (this.esTactil) {
-            this.crearControlesTactiles();
+        let dpadX, dpadY, bombX, bombY, btnSize;
+
+        if (ES_PORTRAIT) {
+            // Debajo del mapa
+            const midY = gridBottom + (H - gridBottom) / 2;
+            dpadX = W * 0.22;
+            dpadY = midY;
+            bombX = W * 0.78;
+            bombY = midY;
+            btnSize = Math.max(28, Math.min(44, (H - gridBottom - 24) / 2.8));
+        } else {
+            // A la derecha del mapa
+            dpadX = gridRight + (W - gridRight) * 0.32;
+            dpadY = H / 2;
+            bombX = gridRight + (W - gridRight) * 0.76;
+            bombY = H / 2;
+            btnSize = Math.max(28, Math.min(44, (W - gridRight) / 5.5));
         }
 
-        // --- Iniciar mapa inmediatamente (ambos tienen el seed) ---
-        this.iniciarConSeed(this.seedInicial);
+        // Fondo D-pad
+        this.add.circle(dpadX, dpadY, btnSize * 2.1, 0x000000, 0.2).setDepth(depth - 1);
 
-        // --- Conectar canal Broadcast para sync del juego ---
-        this.conectarCanal();
-    }
+        // Botones D-pad
+        [
+            { dx: 0, dy: -btnSize, icon: '▲', dir: 'up' },
+            { dx: 0, dy: btnSize, icon: '▼', dir: 'down' },
+            { dx: -btnSize, dy: 0, icon: '◀', dir: 'left' },
+            { dx: btnSize, dy: 0, icon: '▶', dir: 'right' },
+        ].forEach(({ dx, dy, icon, dir }) => {
+            const btn = this.add.rectangle(dpadX + dx, dpadY + dy, btnSize, btnSize, 0x4488ff, alpha)
+                .setDepth(depth).setInteractive().setStrokeStyle(1, 0xffffff, 0.3);
+            this.add.text(dpadX + dx, dpadY + dy, icon, {
+                fontSize: Math.round(btnSize * 0.55) + 'px', color: '#ffffff'
+            }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
 
-    // ========== CONTROLES TACTILES PARA MOVIL ==========
-    crearControlesTactiles() {
-        const W = 1280, H = 720;
-        // Calcular posicion del D-pad: debajo del mapa, lado izquierdo
-        const mapaBottom = GAME_OFFSET_Y + ROWS * TILE;
-        const espacioAbajo = H - mapaBottom;
-        const dpadY = mapaBottom + espacioAbajo / 2 + 10;
-        const dpadX = 120;
-        const btnSize = 52;
-        const depth = 200;
-        const alpha = 0.45;
+            btn.on('pointerdown', () => { this.touchDir = dir; btn.setFillStyle(0x66aaff, 0.85); });
+            btn.on('pointerup', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
+            btn.on('pointerout', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
+        });
 
-        // Fondo semi-transparente del D-pad
-        this.add.circle(dpadX, dpadY, 82, 0x000000, 0.25).setDepth(depth - 1);
-
-        // Boton ARRIBA
-        const btnUp = this.add.rectangle(dpadX, dpadY - btnSize, btnSize, btnSize, 0x4488ff, alpha)
-            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.3);
-        this.add.text(dpadX, dpadY - btnSize, '\u25B2', {
-            fontSize: '22px', color: '#ffffff'
-        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.7);
-
-        // Boton ABAJO
-        const btnDown = this.add.rectangle(dpadX, dpadY + btnSize, btnSize, btnSize, 0x4488ff, alpha)
-            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.3);
-        this.add.text(dpadX, dpadY + btnSize, '\u25BC', {
-            fontSize: '22px', color: '#ffffff'
-        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.7);
-
-        // Boton IZQUIERDA
-        const btnLeft = this.add.rectangle(dpadX - btnSize, dpadY, btnSize, btnSize, 0x4488ff, alpha)
-            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.3);
-        this.add.text(dpadX - btnSize, dpadY, '\u25C0', {
-            fontSize: '22px', color: '#ffffff'
-        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.7);
-
-        // Boton DERECHA
-        const btnRight = this.add.rectangle(dpadX + btnSize, dpadY, btnSize, btnSize, 0x4488ff, alpha)
-            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.3);
-        this.add.text(dpadX + btnSize, dpadY, '\u25B6', {
-            fontSize: '22px', color: '#ffffff'
-        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.7);
-
-        // --- BOTON BOMBA (grande, lado derecho inferior) ---
-        const bombX = W - 120;
-        const bombY = dpadY;
-        const btnBomb = this.add.circle(bombX, bombY, 50, 0xe94560, 0.55)
-            .setDepth(depth).setInteractive().setStrokeStyle(3, 0xffffff, 0.4);
-        this.add.text(bombX, bombY - 8, '\uD83D\uDCA3', {
-            fontSize: '28px'
+        // Boton bomba
+        const bombR = Math.round(btnSize * 1.15);
+        const btnBomb = this.add.circle(bombX, bombY, bombR, 0xe94560, 0.55)
+            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.4);
+        this.add.text(bombX, bombY - Math.round(btnSize * 0.18), '💣', {
+            fontSize: Math.round(btnSize * 0.72) + 'px'
         }).setOrigin(0.5).setDepth(depth + 1);
-        this.add.text(bombX, bombY + 20, 'BOMBA', {
-            fontSize: '10px', fontFamily: 'Arial Black', color: '#ffffff'
-        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.8);
+        this.add.text(bombX, bombY + Math.round(btnSize * 0.58), 'BOMBA', {
+            fontSize: Math.max(8, Math.round(btnSize * 0.28)) + 'px',
+            fontFamily: 'Arial Black', color: '#ffffff'
+        }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
 
-        // --- Eventos tactiles del D-pad ---
-        const configurarDpad = (btn, dir) => {
-            btn.on('pointerdown', () => {
-                this.touchDir = dir;
-                btn.setFillStyle(0x66aaff, 0.8);
-            });
-            btn.on('pointerup', () => {
-                this.touchDir = null;
-                btn.setFillStyle(0x4488ff, alpha);
-            });
-            btn.on('pointerout', () => {
-                this.touchDir = null;
-                btn.setFillStyle(0x4488ff, alpha);
-            });
-        };
-
-        configurarDpad(btnUp, 'up');
-        configurarDpad(btnDown, 'down');
-        configurarDpad(btnLeft, 'left');
-        configurarDpad(btnRight, 'right');
-
-        // --- Evento del boton bomba ---
-        btnBomb.on('pointerdown', () => {
-            this.touchBomb = true;
-            btnBomb.setFillStyle(0xff6680, 0.9);
-        });
-        btnBomb.on('pointerup', () => {
-            btnBomb.setFillStyle(0xe94560, 0.6);
-        });
-        btnBomb.on('pointerout', () => {
-            btnBomb.setFillStyle(0xe94560, 0.6);
-        });
+        btnBomb.on('pointerdown', () => { this.touchBomb = true; btnBomb.setFillStyle(0xff6680, 0.9); });
+        btnBomb.on('pointerup', () => { btnBomb.setFillStyle(0xe94560, 0.6); });
+        btnBomb.on('pointerout', () => { btnBomb.setFillStyle(0xe94560, 0.6); });
     }
 
-    // ========== CONEXION MULTIPLAYER ==========
+    // ========== CANAL MULTIPLAYER ==========
     conectarCanal() {
         const canal = crearCanalJuego(estadoGlobal.idSala);
 
-        // Escuchar movimiento del otro jugador
         canal.on('broadcast', { event: 'move' }, ({ payload }) => {
-            this.remoto.gridX = payload.gx;
-            this.remoto.gridY = payload.gy;
-            this.remoto.pixelX = payload.px;
-            this.remoto.pixelY = payload.py;
+            this.remoto.gridX = payload.gx; this.remoto.gridY = payload.gy;
+            this.remoto.pixelX = payload.px; this.remoto.pixelY = payload.py;
             this.remoto.dir = payload.dir;
-            if (this.remotoSprite) {
-                this.remotoSprite.setPosition(payload.px, payload.py);
-            }
+            if (this.remotoSprite) this.remotoSprite.setPosition(payload.px, payload.py);
         });
 
-        // Escuchar bombas del otro jugador
         canal.on('broadcast', { event: 'bomb' }, ({ payload }) => {
             this.crearBomba(payload.x, payload.y, payload.range, false);
         });
 
-        // Escuchar muerte del otro jugador
-        canal.on('broadcast', { event: 'muerte' }, ({ payload }) => {
+        canal.on('broadcast', { event: 'muerte' }, () => {
             this.remoto.alive = false;
-            if (this.remotoSprite) this.remotoSprite.setTexture('tumba');
+            if (this.remotoSprite)
+                this.remotoSprite.setTexture('tumba').setDisplaySize(this.L.tile, this.L.tile).setOrigin(0.5);
             this.finalizarPartida(true);
         });
 
-        // Escuchar kick de bombas
         canal.on('broadcast', { event: 'kick' }, ({ payload }) => {
             const bomba = this.bombs.find(b => b.gridX === payload.ox && b.gridY === payload.oy);
             if (bomba) this.iniciarKick(bomba, payload.dir);
         });
 
         canal.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                this.textoEstadoJuego.setText('Conectado!');
-            }
+            if (status === 'SUBSCRIBED') this.textoEstadoJuego.setText('Conectado!');
         });
     }
 
-    // ========== INICIAR PARTIDA CON SEED ==========
+    // ========== INICIAR PARTIDA ==========
     iniciarConSeed(seed) {
-        if (this.mapa) return; // Ya se inicio
+        if (this.mapa) return;
 
         const resultado = generarMapa(seed);
         this.mapa = resultado.mapa;
         this.powerupsData = resultado.powerups;
+        this.mapType = resultado.mapType;
 
         this.dibujarMapa();
         this.crearJugadores();
 
-        // Cuenta regresiva 3-2-1-GO!
         this.textoEstadoJuego.setText('Preparate!');
         let cuenta = 3;
         this.textoCuenta.setText(cuenta.toString());
 
         const timer = this.time.addEvent({
-            delay: 800,
-            callback: () => {
+            delay: 800, callback: () => {
                 cuenta--;
-                if (cuenta > 0) {
-                    this.textoCuenta.setText(cuenta.toString());
-                } else if (cuenta === 0) {
-                    this.textoCuenta.setText('GO!');
-                } else {
+                if (cuenta > 0) this.textoCuenta.setText(cuenta.toString());
+                else if (cuenta === 0) this.textoCuenta.setText('GO!');
+                else {
                     this.textoCuenta.setText('');
                     this.juegoActivo = true;
                     this.textoEstadoJuego.setText('En juego!');
                     timer.remove();
                 }
-            },
-            loop: true
+            }, loop: true
         });
     }
 
     // ========== DIBUJAR MAPA ==========
     dibujarMapa() {
+        const { offX, offY, tile } = this.L;
+        const gridW = COLS * tile, gridH = ROWS * tile;
+        const cx = offX + gridW / 2, cy = offY + gridH / 2;
+
+        // Fondo imagen del mapa (visible) con fallback
+        const mapKey = `map${this.mapType}`;
+        if (texturaValida(this, mapKey)) {
+            this.add.image(cx, cy, mapKey)
+                .setDisplaySize(gridW, gridH).setAlpha(0.55).setDepth(0);
+        } else {
+            // Fallback: rectángulo de color según tipo de mapa
+            const mapColors = [0x2d5a1e, 0x3a3a5c, 0x5c2a0e, 0x1a3a5a, 0x4a1a3a];
+            this.add.rectangle(cx, cy, gridW, gridH, mapColors[this.mapType] || 0x2d5a1e)
+                .setAlpha(0.55).setDepth(0);
+        }
+
+        // Tiles
         for (let y = 0; y < ROWS; y++) {
             this.tileSprites[y] = [];
             for (let x = 0; x < COLS; x++) {
-                const px = gridToX(x);
-                const py = gridToY(y);
+                const px = this.gx(x), py = this.gy(y);
 
-                // Siempre poner piso debajo
-                this.add.image(px, py, 'floor');
+                if (this.mapa[y][x] !== 1)
+                    this.add.image(px, py, 'floor').setDisplaySize(tile, tile).setDepth(1);
 
-                let key = null;
-                if (this.mapa[y][x] === 1) key = 'wall';
-                else if (this.mapa[y][x] === 2) key = 'block';
-
-                if (key) {
-                    this.tileSprites[y][x] = this.add.image(px, py, key);
+                if (this.mapa[y][x] === 1) {
+                    this.tileSprites[y][x] = this.add.image(px, py, 'wall').setDisplaySize(tile, tile).setDepth(2);
+                } else if (this.mapa[y][x] === 2) {
+                    this.tileSprites[y][x] = this.add.image(px, py, 'block').setDisplaySize(tile, tile).setDepth(2);
                 } else {
                     this.tileSprites[y][x] = null;
                 }
@@ -853,23 +1012,39 @@ class SceneGame extends Phaser.Scene {
         }
 
         // Borde del area de juego
-        this.add.rectangle(
-            GAME_OFFSET_X + COLS * TILE / 2,
-            GAME_OFFSET_Y + ROWS * TILE / 2,
-            COLS * TILE + 4, ROWS * TILE + 4
-        ).setStrokeStyle(2, 0xe94560).setFillStyle(0, 0);
+        this.add.rectangle(cx, cy, gridW + 4, gridH + 4)
+            .setStrokeStyle(2, 0xe94560).setFillStyle(0, 0).setDepth(3);
     }
 
-    // ========== CREAR JUGADORES ==========
+    // ========== JUGADORES ==========
     crearJugadores() {
-        const localKey = estadoGlobal.numJugador === 1 ? 'player1' : 'player2';
-        const remotoKey = estadoGlobal.numJugador === 1 ? 'player2' : 'player1';
+        const tile = this.L.tile;
+        const charSize = Math.round(tile * 1.4);
 
-        this.localSprite = this.add.image(this.local.pixelX, this.local.pixelY, localKey).setDepth(10);
-        this.remotoSprite = this.add.image(this.remoto.pixelX, this.remoto.pixelY, remotoKey).setDepth(10);
+        this.localSprite = this.add.image(this.local.pixelX, this.local.pixelY, `char${this.miPersonaje}`)
+            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.5).setDepth(10);
+
+        this.remotoSprite = this.add.image(this.remoto.pixelX, this.remoto.pixelY, `char${this.rivalPersonaje}`)
+            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.5).setDepth(10);
+
+        // Guardar el scale base que corresponde al displaySize
+        // (setDisplaySize calcula internamente scaleX/Y, lo guardamos para no perderlo)
+        this.localBaseScaleX = this.localSprite.scaleX;
+        this.localBaseScaleY = this.localSprite.scaleY;
+        this.remotoBaseScaleX = this.remotoSprite.scaleX;
+        this.remotoBaseScaleY = this.remotoSprite.scaleY;
+
+        // Sombra bajo cada jugador para hacer mas visibles
+        this.localShadow = this.add.ellipse(this.local.pixelX, this.local.pixelY + tile * 0.35,
+            tile * 0.6, tile * 0.2, 0x000000, 0.3).setDepth(9);
+        this.remotoShadow = this.add.ellipse(this.remoto.pixelX, this.remoto.pixelY + tile * 0.35,
+            tile * 0.6, tile * 0.2, 0x000000, 0.3).setDepth(9);
+
+        // Timer de animacion de bobbing
+        this.walkAnimTimer = 0;
     }
 
-    // ========== UPDATE (cada frame) ==========
+    // ========== UPDATE ==========
     update(time, delta) {
         if (!this.juegoActivo || !this.local.alive) return;
 
@@ -878,7 +1053,6 @@ class SceneGame extends Phaser.Scene {
         this.actualizarBombasKicked(delta);
         this.actualizarStats();
 
-        // Sync periodico
         this.syncTimer += delta;
         if (this.syncTimer >= SYNC_INTERVAL) {
             this.syncTimer = 0;
@@ -889,24 +1063,72 @@ class SceneGame extends Phaser.Scene {
             });
         }
 
-        // Colocar bomba (teclado o tactil)
         if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || this.touchBomb) {
             this.ponerBomba();
             this.touchBomb = false;
+        }
+
+        // Animacion de caminar (bobbing + squash)
+        this.animarMovimiento(delta);
+    }
+
+    animarMovimiento(delta) {
+        const tile = this.L.tile;
+        const bsxL = this.localBaseScaleX || 1;
+        const bsyL = this.localBaseScaleY || 1;
+        const bsxR = this.remotoBaseScaleX || 1;
+        const bsyR = this.remotoBaseScaleY || 1;
+
+        if (this.localSprite && this.local.alive) {
+            if (this.local.moving) {
+                this.walkAnimTimer += delta * 0.012;
+                const bob = Math.sin(this.walkAnimTimer * 6) * tile * 0.06;
+                const squash = 1 + Math.sin(this.walkAnimTimer * 12) * 0.06;
+                this.localSprite.setY(this.local.pixelY + bob);
+                this.localSprite.setX(this.local.pixelX);
+                this.localSprite.setScale(bsxL * squash, bsyL * (2 - squash));
+                // Flip horizontal segun direccion
+                this.localSprite.setFlipX(this.local.dir === 'left');
+            } else {
+                this.walkAnimTimer = 0;
+                this.localSprite.setPosition(this.local.pixelX, this.local.pixelY);
+                this.localSprite.setScale(bsxL, bsyL);
+            }
+            // Actualizar sombra
+            if (this.localShadow) {
+                this.localShadow.setPosition(this.local.pixelX, this.local.pixelY + tile * 0.35);
+            }
+        }
+
+        // Animacion suave del remoto (interpolacion)
+        if (this.remotoSprite && this.remoto.alive) {
+            const rx = this.remotoSprite.x, ry = this.remotoSprite.y;
+            const tx = this.remoto.pixelX, ty = this.remoto.pixelY;
+            const isMoving = Math.abs(rx - tx) > 1 || Math.abs(ry - ty) > 1;
+            if (isMoving) {
+                this.remotoSprite.setFlipX(this.remoto.dir === 'left');
+                const bob = Math.sin(Date.now() * 0.008) * tile * 0.05;
+                this.remotoSprite.setY(ty + bob);
+                const sq = 1 + Math.sin(Date.now() * 0.016) * 0.05;
+                this.remotoSprite.setScale(bsxR * sq, bsyR * (2 - sq));
+            } else {
+                this.remotoSprite.setPosition(tx, ty);
+                this.remotoSprite.setScale(bsxR, bsyR);
+            }
+            if (this.remotoShadow) {
+                this.remotoShadow.setPosition(this.remoto.pixelX, this.remoto.pixelY + tile * 0.35);
+            }
         }
     }
 
     // ========== MOVIMIENTO ==========
     manejarMovimiento(delta) {
         if (this.local.moving) {
-            // Mover hacia el target
             const dx = this.local.targetX - this.local.pixelX;
             const dy = this.local.targetY - this.local.pixelY;
             const dist = Math.sqrt(dx * dx + dy * dy);
             const step = this.local.speed * delta / 1000;
-
             if (dist <= step + 1) {
-                // Llego al destino
                 this.local.pixelX = this.local.targetX;
                 this.local.pixelY = this.local.targetY;
                 this.local.moving = false;
@@ -920,13 +1142,10 @@ class SceneGame extends Phaser.Scene {
 
         if (!this.local.moving) {
             let dx = 0, dy = 0, dir = null;
-
-            // Teclado
             if (this.cursors.left.isDown || this.keys.A.isDown) { dx = -1; dir = 'left'; }
             else if (this.cursors.right.isDown || this.keys.D.isDown) { dx = 1; dir = 'right'; }
             else if (this.cursors.up.isDown || this.keys.W.isDown) { dy = -1; dir = 'up'; }
             else if (this.cursors.down.isDown || this.keys.S.isDown) { dy = 1; dir = 'down'; }
-            // Tactil (D-pad)
             else if (this.touchDir === 'left') { dx = -1; dir = 'left'; }
             else if (this.touchDir === 'right') { dx = 1; dir = 'right'; }
             else if (this.touchDir === 'up') { dy = -1; dir = 'up'; }
@@ -934,31 +1153,20 @@ class SceneGame extends Phaser.Scene {
 
             if (dir) {
                 this.local.dir = dir;
-                const nx = this.local.gridX + dx;
-                const ny = this.local.gridY + dy;
-
+                const nx = this.local.gridX + dx, ny = this.local.gridY + dy;
                 if (this.puedeMover(nx, ny)) {
-                    this.local.gridX = nx;
-                    this.local.gridY = ny;
-                    this.local.targetX = gridToX(nx);
-                    this.local.targetY = gridToY(ny);
+                    this.local.gridX = nx; this.local.gridY = ny;
+                    this.local.targetX = this.gx(nx);
+                    this.local.targetY = this.gy(ny);
                     this.local.moving = true;
-                } else {
-                    // Intentar patear bomba si tiene el power-up
-                    if (this.local.hasKick) {
-                        const bomba = this.bombs.find(b => b.gridX === nx && b.gridY === ny && !b.kicking);
-                        if (bomba) {
-                            this.iniciarKick(bomba, dir);
-                            broadcast('kick', { ox: nx, oy: ny, dir });
-                        }
-                    }
+                } else if (this.local.hasKick) {
+                    const bomba = this.bombs.find(b => b.gridX === nx && b.gridY === ny && !b.kicking);
+                    if (bomba) { this.iniciarKick(bomba, dir); broadcast('kick', { ox: nx, oy: ny, dir }); }
                 }
             }
         }
 
-        if (this.localSprite) {
-            this.localSprite.setPosition(this.local.pixelX, this.local.pixelY);
-        }
+        // La posicion del sprite se actualiza en animarMovimiento()
     }
 
     puedeMover(x, y) {
@@ -973,134 +1181,95 @@ class SceneGame extends Phaser.Scene {
         if (this.local.bombsOut >= this.local.maxBombs) return;
         const gx = this.local.gridX, gy = this.local.gridY;
         if (this.bombs.some(b => b.gridX === gx && b.gridY === gy)) return;
-
         this.crearBomba(gx, gy, this.local.fireRange, true);
         broadcast('bomb', { x: gx, y: gy, range: this.local.fireRange });
     }
 
     crearBomba(gx, gy, range, esLocal) {
-        const px = gridToX(gx), py = gridToY(gy);
-        const sprite = this.add.image(px, py, 'bomb').setDepth(5);
-
-        // Animacion de pulso
-        this.tweens.add({
-            targets: sprite, scaleX: 1.15, scaleY: 1.15,
-            duration: 300, yoyo: true, repeat: -1
-        });
-
+        const tile = this.L.tile;
+        const sprite = this.add.image(this.gx(gx), this.gy(gy), 'bomb')
+            .setDisplaySize(tile, tile).setDepth(5);
+        this.tweens.add({ targets: sprite, scaleX: 1.15, scaleY: 1.15, duration: 300, yoyo: true, repeat: -1 });
         const bomba = { gridX: gx, gridY: gy, timer: BOMB_TIMER, range, sprite, esLocal, kicking: false };
         this.bombs.push(bomba);
         if (esLocal) this.local.bombsOut++;
     }
 
     manejarBombas(delta) {
-        const bombasExplotar = [];
-
-        this.bombs.forEach(b => {
-            if (b.kicking) return; // Las kicked se manejan aparte
-            b.timer -= delta;
-            if (b.timer <= 0) bombasExplotar.push(b);
-        });
-
-        bombasExplotar.forEach(b => this.explotarBomba(b));
+        const explotar = [];
+        this.bombs.forEach(b => { if (!b.kicking) { b.timer -= delta; if (b.timer <= 0) explotar.push(b); } });
+        explotar.forEach(b => this.explotarBomba(b));
     }
 
     explotarBomba(bomba) {
-        // Remover bomba
         bomba.sprite.destroy();
         this.bombs = this.bombs.filter(b => b !== bomba);
         if (bomba.esLocal) this.local.bombsOut = Math.max(0, this.local.bombsOut - 1);
 
         const { gridX, gridY, range } = bomba;
-        const tilesAfectados = [{ x: gridX, y: gridY }];
+        const afectados = [{ x: gridX, y: gridY }];
 
-        // Expandir en 4 direcciones
-        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-        dirs.forEach(([dx, dy]) => {
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
             for (let i = 1; i <= range; i++) {
-                const nx = gridX + dx * i;
-                const ny = gridY + dy * i;
+                const nx = gridX + dx * i, ny = gridY + dy * i;
                 if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) break;
-                if (this.mapa[ny][nx] === 1) break; // Muro para
-
-                tilesAfectados.push({ x: nx, y: ny });
-
-                if (this.mapa[ny][nx] === 2) {
-                    // Destruir bloque
-                    this.destruirBloque(nx, ny);
-                    break; // Bloque para la explosion
-                }
+                if (this.mapa[ny][nx] === 1) break;
+                afectados.push({ x: nx, y: ny });
+                if (this.mapa[ny][nx] === 2) { this.destruirBloque(nx, ny); break; }
             }
         });
 
-        // Crear sprites de explosion
-        const expSprites = tilesAfectados.map(({ x, y }) => {
+        const tile = this.L.tile;
+        const expSprites = afectados.map(({ x, y }) => {
             const isCenter = x === gridX && y === gridY;
-            const key = isCenter ? 'exp_center' :
-                (x !== gridX ? 'exp_h' : 'exp_v');
-            return this.add.image(gridToX(x), gridToY(y), key).setDepth(8).setAlpha(0.9);
+            const key = isCenter ? 'exp_center' : (x !== gridX ? 'exp_h' : 'exp_v');
+            return this.add.image(this.gx(x), this.gy(y), key).setDisplaySize(tile, tile).setDepth(8).setAlpha(0.9);
         });
 
-        // Guardar explosion activa
-        const exp = { tiles: tilesAfectados, sprites: expSprites };
+        const exp = { tiles: afectados, sprites: expSprites };
         this.explosiones.push(exp);
 
-        // Cadena: si hay otra bomba en la zona, explotarla
-        this.bombs.forEach(b => {
-            if (tilesAfectados.some(t => t.x === b.gridX && t.y === b.gridY)) {
-                b.timer = 0;
-            }
-        });
+        // Cadena de bombas
+        this.bombs.forEach(b => { if (afectados.some(t => t.x === b.gridX && t.y === b.gridY)) b.timer = 0; });
 
-        // Verificar muerte del jugador local
-        if (this.local.alive && tilesAfectados.some(t => t.x === this.local.gridX && t.y === this.local.gridY)) {
+        // Muerte local
+        if (this.local.alive && afectados.some(t => t.x === this.local.gridX && t.y === this.local.gridY))
             this.morir();
-        }
 
-        // Verificar muerte del remoto
-        if (this.remoto.alive && tilesAfectados.some(t => t.x === this.remoto.gridX && t.y === this.remoto.gridY)) {
+        // Muerte remoto
+        if (this.remoto.alive && afectados.some(t => t.x === this.remoto.gridX && t.y === this.remoto.gridY)) {
             this.remoto.alive = false;
-            if (this.remotoSprite) this.remotoSprite.setTexture('tumba');
-            this.finalizarPartida(true); // Yo gano
+            if (this.remotoSprite)
+                this.remotoSprite.setTexture('tumba').setDisplaySize(tile, tile).setOrigin(0.5);
+            this.finalizarPartida(true);
         }
 
-        // Eliminar explosion despues de EXPLOSION_DURATION
         this.time.delayedCall(EXPLOSION_DURATION, () => {
             expSprites.forEach(s => s.destroy());
             this.explosiones = this.explosiones.filter(e => e !== exp);
         });
 
-        // Sonido/efecto
-        this.cameras.main.shake(100, 0.005);
+        this.cameras.main.shake(80, 0.006);
     }
 
     destruirBloque(x, y) {
         this.mapa[y][x] = 0;
-        if (this.tileSprites[y][x]) {
-            this.tileSprites[y][x].destroy();
-            this.tileSprites[y][x] = null;
-        }
+        if (this.tileSprites[y][x]) { this.tileSprites[y][x].destroy(); this.tileSprites[y][x] = null; }
 
-        // Verificar si hay power-up escondido
         const key = x + ',' + y;
         if (this.powerupsData[key]) {
             const tipo = this.powerupsData[key];
-            const texKey = 'pu_' + tipo;
-            const px = gridToX(x), py = gridToY(y);
-            const sprite = this.add.image(px, py, texKey).setDepth(3);
-
-            // Letra encima del power-up
+            const tile = this.L.tile;
+            const px = this.gx(x), py = this.gy(y);
+            const sprite = this.add.image(px, py, 'pu_' + tipo).setDisplaySize(tile, tile).setDepth(3);
             const letras = { bomb: 'B', fire: 'F', speed: 'S', kick: 'K' };
             const txt = this.add.text(px, py, letras[tipo], {
-                fontSize: '20px', fontFamily: 'Arial Black', color: '#ffffff',
-                stroke: '#000000', strokeThickness: 3
+                fontSize: Math.max(10, Math.round(tile * 0.42)) + 'px',
+                fontFamily: 'Arial Black', color: '#ffffff', stroke: '#000', strokeThickness: 3
             }).setOrigin(0.5).setDepth(4);
 
-            this.powerupSprites[key] = { sprite, txt, tipo, x, y };
-
-            // Animacion de aparicion
-            sprite.setScale(0);
-            txt.setScale(0);
+            this.powerupSprites[key] = { sprite, txt, tipo };
+            sprite.setScale(0); txt.setScale(0);
             this.tweens.add({ targets: [sprite, txt], scale: 1, duration: 300, ease: 'Back.easeOut' });
         }
     }
@@ -1111,7 +1280,6 @@ class SceneGame extends Phaser.Scene {
         const pu = this.powerupSprites[key];
         if (!pu) return;
 
-        // Recoger power-up
         switch (pu.tipo) {
             case 'bomb': this.local.maxBombs++; break;
             case 'fire': this.local.fireRange++; break;
@@ -1119,83 +1287,46 @@ class SceneGame extends Phaser.Scene {
             case 'kick': this.local.hasKick = true; break;
         }
 
-        // Destruir visualmente
-        pu.sprite.destroy();
-        pu.txt.destroy();
-        delete this.powerupSprites[key];
-        delete this.powerupsData[key];
+        pu.sprite.destroy(); pu.txt.destroy();
+        delete this.powerupSprites[key]; delete this.powerupsData[key];
 
-        // Efecto visual de recoger
-        const efecto = this.add.text(gridToX(gx), gridToY(gy) - 20, '+' + pu.tipo.toUpperCase(), {
-            fontSize: '14px', fontFamily: 'Arial Black', color: '#ffcc44',
-            stroke: '#000', strokeThickness: 3
+        const efecto = this.add.text(this.gx(gx), this.gy(gy) - 20, '+' + pu.tipo.toUpperCase(), {
+            fontSize: '13px', fontFamily: 'Arial Black', color: '#ffcc44', stroke: '#000', strokeThickness: 3
         }).setOrigin(0.5).setDepth(20);
-        this.tweens.add({
-            targets: efecto, y: efecto.y - 40, alpha: 0,
-            duration: 800, onComplete: () => efecto.destroy()
-        });
+        this.tweens.add({ targets: efecto, y: efecto.y - 40, alpha: 0, duration: 800, onComplete: () => efecto.destroy() });
     }
 
     checkExplosion(gx, gy) {
-        if (this.explosiones.some(e => e.tiles.some(t => t.x === gx && t.y === gy))) {
-            this.morir();
-        }
+        if (this.explosiones.some(e => e.tiles.some(t => t.x === gx && t.y === gy))) this.morir();
     }
 
-    // ========== KICK DE BOMBAS ==========
+    // ========== KICK ==========
     iniciarKick(bomba, dir) {
         bomba.kicking = true;
         const dirs = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
-        bomba.kickDx = dirs[dir][0];
-        bomba.kickDy = dirs[dir][1];
-        bomba.kickProgress = 0;
+        bomba.kickDx = dirs[dir][0]; bomba.kickDy = dirs[dir][1]; bomba.kickProgress = 0;
         this.kickedBombs.push(bomba);
     }
 
     actualizarBombasKicked(delta) {
-        const velocidadKick = 6; // tiles por segundo
         const parar = [];
-
         this.kickedBombs.forEach(b => {
-            b.timer -= delta; // La bomba sigue contando
-
-            b.kickProgress += velocidadKick * delta / 1000;
-
+            b.timer -= delta;
+            b.kickProgress += 6 * delta / 1000;
             if (b.kickProgress >= 1) {
                 b.kickProgress = 0;
-                const nx = b.gridX + b.kickDx;
-                const ny = b.gridY + b.kickDy;
-
-                // Verificar si puede seguir
-                if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS ||
-                    this.mapa[ny][nx] !== 0 ||
+                const nx = b.gridX + b.kickDx, ny = b.gridY + b.kickDy;
+                if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS || this.mapa[ny][nx] !== 0 ||
                     this.bombs.some(ob => ob !== b && ob.gridX === nx && ob.gridY === ny)) {
-                    // Parar aqui
-                    b.kicking = false;
-                    parar.push(b);
-                } else {
-                    b.gridX = nx;
-                    b.gridY = ny;
-                }
+                    b.kicking = false; parar.push(b);
+                } else { b.gridX = nx; b.gridY = ny; }
             }
-
-            // Actualizar posicion visual
-            const fraccion = b.kickProgress;
-            const baseX = gridToX(b.gridX);
-            const baseY = gridToY(b.gridY);
             b.sprite.setPosition(
-                baseX + b.kickDx * fraccion * TILE,
-                baseY + b.kickDy * fraccion * TILE
+                this.gx(b.gridX) + b.kickDx * b.kickProgress * this.L.tile,
+                this.gy(b.gridY) + b.kickDy * b.kickProgress * this.L.tile
             );
-
-            // Explotar si timer llego a 0
-            if (b.timer <= 0) {
-                b.kicking = false;
-                parar.push(b);
-                this.explotarBomba(b);
-            }
+            if (b.timer <= 0) { b.kicking = false; parar.push(b); this.explotarBomba(b); }
         });
-
         this.kickedBombs = this.kickedBombs.filter(b => !parar.includes(b));
     }
 
@@ -1204,47 +1335,40 @@ class SceneGame extends Phaser.Scene {
         if (!this.local.alive) return;
         this.local.alive = false;
         this.juegoActivo = false;
-
-        if (this.localSprite) this.localSprite.setTexture('tumba');
-
-        // Avisar al otro jugador
+        if (this.localSprite)
+            this.localSprite.setTexture('tumba').setDisplaySize(this.L.tile, this.L.tile).setOrigin(0.5);
         broadcast('muerte', { jugador: estadoGlobal.numJugador });
-
-        // Pantalla de derrota
         this.finalizarPartida(false);
     }
 
     finalizarPartida(gane) {
         this.juegoActivo = false;
-
         this.time.delayedCall(1500, () => {
-            this.scene.start('SceneResult', { gane });
+            this.scene.start('SceneResult', {
+                gane,
+                miPersonaje: this.miPersonaje,
+                rivalPersonaje: this.rivalPersonaje
+            });
         });
     }
 
-    // ========== ACTUALIZAR STATS UI ==========
+    // ========== STATS ==========
     actualizarStats() {
-        const miStats = this.local;
-        const rivStats = this.remoto;
+        const fmt = (s) =>
+            `B:${s.maxBombs} F:${s.fireRange} V:${Math.round(s.speed / BASE_SPEED * 100)}%${s.hasKick ? ' K' : ''}`;
 
         if (ES_MOVIL) {
-            // Mini HUD movil - solo iconos compactos
-            const fmtMini = (s, label) =>
-                `${label} B:${s.maxBombs} F:${s.fireRange} S:${Math.round((s.speed / BASE_SPEED) * 100)}%${s.hasKick ? ' K' : ''}`;
-            if (this.mobileStatsLocal) this.mobileStatsLocal.setText(fmtMini(miStats, 'TU'));
-            if (this.mobileStatsRemoto) this.mobileStatsRemoto.setText(fmtMini(rivStats, 'RIVAL'));
+            if (this.mobileHudLocal) this.mobileHudLocal.setText('▶ ' + fmt(this.local));
+            if (this.mobileHudRemoto) this.mobileHudRemoto.setText(fmt(this.remoto) + ' ◀');
         } else {
-            const formatStats = (s) =>
-                `Bombas: ${s.maxBombs} | Fuego: ${s.fireRange}\n` +
-                `Velocidad: ${Math.round((s.speed / BASE_SPEED) * 100)}%\n` +
-                `Patear: ${s.hasKick ? 'SI' : 'NO'}`;
-
+            const fmtLong = (s) =>
+                `Bombas: ${s.maxBombs} | Fuego: ${s.fireRange}\nVelocidad: ${Math.round(s.speed / BASE_SPEED * 100)}%\nPatear: ${s.hasKick ? 'SI' : 'NO'}`;
             if (estadoGlobal.numJugador === 1) {
-                this.textoStatsP1.setText(formatStats(miStats));
-                this.textoStatsP2.setText(formatStats(rivStats));
+                this.textoStatsP1.setText(fmtLong(this.local));
+                this.textoStatsP2.setText(fmtLong(this.remoto));
             } else {
-                this.textoStatsP1.setText(formatStats(rivStats));
-                this.textoStatsP2.setText(formatStats(miStats));
+                this.textoStatsP1.setText(fmtLong(this.remoto));
+                this.textoStatsP2.setText(fmtLong(this.local));
             }
         }
     }
@@ -1256,57 +1380,53 @@ class SceneGame extends Phaser.Scene {
 class SceneResult extends Phaser.Scene {
     constructor() { super({ key: 'SceneResult' }); }
 
-    init(data) { this.gane = data.gane; }
+    init(data) {
+        this.gane = data.gane;
+        this.miPersonaje = data.miPersonaje ?? 0;
+        this.rivalPersonaje = data.rivalPersonaje ?? 0;
+    }
 
     create() {
-        const W = 1280, H = 720;
+        const W = this.scale.width, H = this.scale.height;
 
-        // Fondo con tiles
-        for (let y = 0; y < Math.ceil(H / TILE); y++) {
-            for (let x = 0; x < Math.ceil(W / TILE); x++) {
-                this.add.image(x * TILE + TILE / 2, y * TILE + TILE / 2, 'floor').setAlpha(0.2);
-            }
-        }
-        this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.7);
+        for (let y = 0; y < Math.ceil(H / 48) + 1; y++)
+            for (let x = 0; x < Math.ceil(W / 48) + 1; x++)
+                this.add.image(x * 48 + 24, y * 48 + 24, 'floor').setAlpha(0.12);
 
-        // Resultado
-        const texto = this.gane ? 'VICTORIA!' : 'DERROTA...';
+        this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.78);
+
+        const texto = this.gane ? '¡VICTORIA!' : 'DERROTA...';
         const color = this.gane ? '#44ff88' : '#e94560';
-        const emoji = this.gane ? 'player1' : 'tumba';
+        const charKey = this.gane ? `char${this.miPersonaje}` : 'tumba';
+        const charSize = Math.min(130, W * 0.22);
 
-        const titulo = this.add.text(W / 2, 200, texto, {
-            fontSize: '80px', fontFamily: 'Arial Black',
-            color: color, stroke: '#000000', strokeThickness: 10
+        const titulo = this.add.text(W / 2, H * 0.24, texto, {
+            fontSize: Math.min(80, Math.round(W * 0.12)) + 'px', fontFamily: 'Arial Black',
+            color, stroke: '#000000', strokeThickness: 10
         }).setOrigin(0.5).setScale(0);
         this.tweens.add({ targets: titulo, scale: 1, duration: 600, ease: 'Back.easeOut' });
 
-        // Icono grande
-        const icono = this.add.image(W / 2, 350, emoji).setScale(3).setAlpha(0);
+        const icono = this.add.image(W / 2, H * 0.5, charKey)
+            .setDisplaySize(charSize, charSize).setAlpha(0);
         this.tweens.add({ targets: icono, alpha: 1, duration: 800, delay: 400 });
 
-        // Boton jugar de nuevo
-        const btn = this.add.rectangle(W / 2, 500, 280, 55, 0xaa2244, 0.9)
-            .setStrokeStyle(2, 0xffffff)
-            .setInteractive({ useHandCursor: true });
-        const btnLbl = this.add.text(W / 2, 500, 'JUGAR DE NUEVO', {
-            fontSize: '20px', fontFamily: 'Arial Black', color: '#fff'
+        const btnW = Math.min(260, W * 0.55), btnY = H * 0.73;
+        const btn = this.add.rectangle(W / 2, btnY, btnW, 48, 0xaa2244, 0.9)
+            .setStrokeStyle(2, 0xffffff).setInteractive({ useHandCursor: true });
+        const btnLbl = this.add.text(W / 2, btnY, 'JUGAR DE NUEVO', {
+            fontSize: '17px', fontFamily: 'Arial Black', color: '#fff'
         }).setOrigin(0.5);
 
         btn.on('pointerover', () => { btn.setScale(1.05); btnLbl.setScale(1.05); });
         btn.on('pointerout', () => { btn.setScale(1); btnLbl.setScale(1); });
         btn.on('pointerdown', () => {
-            if (estadoGlobal.canal) {
-                sbClient.removeChannel(estadoGlobal.canal);
-                estadoGlobal.canal = null;
-            }
-            estadoGlobal.idSala = null;
-            estadoGlobal.numJugador = null;
+            if (estadoGlobal.canal) { sbClient.removeChannel(estadoGlobal.canal); estadoGlobal.canal = null; }
+            estadoGlobal.idSala = null; estadoGlobal.numJugador = null;
             this.scene.start('SceneMenu');
         });
 
-        // Tip
-        this.add.text(W / 2, 600, 'Abre 2 pestanas en localhost:8000 para probar local', {
-            fontSize: '12px', color: '#556677'
+        this.add.text(W / 2, H * 0.87, 'Bomberman 1v1 Online • v2.0', {
+            fontSize: '11px', color: '#445566'
         }).setOrigin(0.5);
     }
 }
@@ -1316,15 +1436,17 @@ class SceneResult extends Phaser.Scene {
 // ============================================================
 const config = {
     type: Phaser.AUTO,
-    width: 1280,
-    height: 720,
+    width: SCREEN_W,
+    height: SCREEN_H,
     parent: 'game-container',
     backgroundColor: '#1a1a2e',
-    pixelArt: true,  // Renderizado pixelado, sin antialiasing
+    pixelArt: true,
     scene: [SceneMenu, SceneGame, SceneResult],
     scale: {
         mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: SCREEN_W,
+        height: SCREEN_H
     }
 };
 
