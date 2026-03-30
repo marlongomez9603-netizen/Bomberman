@@ -847,6 +847,7 @@ class SceneGame extends Phaser.Scene {
         }).setOrigin(0.5).setDepth(100);
     }
 
+<<<<<<< HEAD
     // ========== CONTROLES TACTILES — JOYSTICK VIRTUAL ==========
     crearControlesTactiles() {
         const { W, H, offX, offY, tile } = this.L;
@@ -999,6 +1000,64 @@ class SceneGame extends Phaser.Scene {
         }).setOrigin(0.5).setDepth(depth + 1);
         this.add.text(bombX, bombY + Math.round(bombR * 0.55), 'BOMBA', {
             fontSize: Math.max(8, Math.round(bombR * 0.25)) + 'px',
+=======
+    // ========== CONTROLES TACTILES ==========
+    crearControlesTactiles() {
+        const { W, H, offX, offY, tile } = this.L;
+        const depth = 200, alpha = 0.45;
+        const gridRight = offX + COLS * tile;
+        const gridBottom = offY + ROWS * tile;
+
+        let dpadX, dpadY, bombX, bombY, btnSize;
+
+        if (ES_PORTRAIT) {
+            // Debajo del mapa
+            const midY = gridBottom + (H - gridBottom) / 2;
+            dpadX = W * 0.22;
+            dpadY = midY;
+            bombX = W * 0.78;
+            bombY = midY;
+            btnSize = Math.max(28, Math.min(44, (H - gridBottom - 24) / 2.8));
+        } else {
+            // A la derecha del mapa
+            dpadX = gridRight + (W - gridRight) * 0.32;
+            dpadY = H / 2;
+            bombX = gridRight + (W - gridRight) * 0.76;
+            bombY = H / 2;
+            btnSize = Math.max(28, Math.min(44, (W - gridRight) / 5.5));
+        }
+
+        // Fondo D-pad
+        this.add.circle(dpadX, dpadY, btnSize * 2.1, 0x000000, 0.2).setDepth(depth - 1);
+
+        // Botones D-pad
+        [
+            { dx: 0, dy: -btnSize, icon: '▲', dir: 'up' },
+            { dx: 0, dy: btnSize, icon: '▼', dir: 'down' },
+            { dx: -btnSize, dy: 0, icon: '◀', dir: 'left' },
+            { dx: btnSize, dy: 0, icon: '▶', dir: 'right' },
+        ].forEach(({ dx, dy, icon, dir }) => {
+            const btn = this.add.rectangle(dpadX + dx, dpadY + dy, btnSize, btnSize, 0x4488ff, alpha)
+                .setDepth(depth).setInteractive().setStrokeStyle(1, 0xffffff, 0.3);
+            this.add.text(dpadX + dx, dpadY + dy, icon, {
+                fontSize: Math.round(btnSize * 0.55) + 'px', color: '#ffffff'
+            }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
+
+            btn.on('pointerdown', () => { this.touchDir = dir; btn.setFillStyle(0x66aaff, 0.85); });
+            btn.on('pointerup', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
+            btn.on('pointerout', () => { this.touchDir = null; btn.setFillStyle(0x4488ff, alpha); });
+        });
+
+        // Boton bomba
+        const bombR = Math.round(btnSize * 1.15);
+        const btnBomb = this.add.circle(bombX, bombY, bombR, 0xe94560, 0.55)
+            .setDepth(depth).setInteractive().setStrokeStyle(2, 0xffffff, 0.4);
+        this.add.text(bombX, bombY - Math.round(btnSize * 0.18), '💣', {
+            fontSize: Math.round(btnSize * 0.72) + 'px'
+        }).setOrigin(0.5).setDepth(depth + 1);
+        this.add.text(bombX, bombY + Math.round(btnSize * 0.58), 'BOMBA', {
+            fontSize: Math.max(8, Math.round(btnSize * 0.28)) + 'px',
+>>>>>>> 1851d0075d3684f1fc06e5cbc8f28b4fd450cd67
             fontFamily: 'Arial Black', color: '#ffffff'
         }).setOrigin(0.5).setDepth(depth + 1).setAlpha(0.9);
 
