@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv \"A_small_agile_202603291338.png\" \"caza_ligero.png\")",
+      "Bash(mv \"A_medium_sci-fi_202603291338.png\" \"fragata.png\")",
+      "Bash(mv \"A_fast_upgraded_202603291337.png\" \"caza_avanzado.png\")",
+      "Bash(mv \"A_large_and_202603291338.png\" \"crucero.png\")",
+      "Bash(mv \"A_heavy_sci-fi_202603291338.png\" \"bombardero.png\")",
+      "Bash(mv \"A_horizontal_sprite_202603291341.png\" \"explosion.png\")",
+      "Bash(mv \"Animated_laser_bolt_202603291340.jpeg\" \"laser.jpeg\")",
+      "Bash(mv \"Animated_torpedo_sprite_202603291340.jpeg\" \"torpedo.jpeg\")",
+      "Bash(mv \"Spacecraft_explosion_sprite_202603291341.jpeg\" \"explosion_nave.jpeg\")",
+      "Bash(mv \"A_small_sci-fi_202603291334.png\" \"mina_nv1.png\")",
+      "Bash(mv \"A_medium_sci-fi_202603291334.png\" \"mina_nv2.png\")",
+      "Bash(mv \"A_large_imposing_202603291335.png\" \"mina_nv3.png\")",
+      "Bash(mv \"A_small_sci-fi_202603291335.png\" \"cristalizador_nv1.png\")",
+      "Bash(mv \"A_medium_sci-fi_202603291335.png\" \"cristalizador_nv2.png\")",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(python -m http.server 8000)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(ls \"C:\\\\Users\\\\majog\\\\Desktop\\\\Me\\\\PROYECTO PERSONAL\\\\assets\"\" 2>/dev/null && find \"C:UsersmajogDesktopMePROYECTO PERSONALassets \" -type f)",
+      "Bash(ls -la \"C:\\\\Users\\\\majog\\\\Desktop\\\\Me\\\\PROYECTO PERSONAL\\\\assets\\\\personajes\"\" && echo \"---\" && ls -la \"C:UsersmajogDesktopMePROYECTO PERSONALassetsmapas\"\")",
+      "Bash(taskkill /PID 20460 /F)",
+      "Bash(cmd //c \"taskkill /PID 20460 /F\")"
+    ]
+  }
+}
