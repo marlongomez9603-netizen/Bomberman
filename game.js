@@ -189,9 +189,9 @@ async function unirseASala(id, nombre, personaje) {
 }
 
 async function leerSala(id) {
-    const { data, error } = await sbClient.from('salas').select('*').eq('id', id).single();
+    const { data, error } = await sbClient.from('salas').select('*').eq('id', id).maybeSingle();
     if (error) throw error;
-    return data;
+    return data;  // null si no existe
 }
 
 function escucharSala(id, callback) {
@@ -1027,6 +1027,13 @@ class SceneGame extends Phaser.Scene {
         this.remotoSprite = this.add.image(this.remoto.pixelX, this.remoto.pixelY, `char${this.rivalPersonaje}`)
             .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.5).setDepth(10);
 
+        // Guardar el scale base que corresponde al displaySize
+        // (setDisplaySize calcula internamente scaleX/Y, lo guardamos para no perderlo)
+        this.localBaseScaleX = this.localSprite.scaleX;
+        this.localBaseScaleY = this.localSprite.scaleY;
+        this.remotoBaseScaleX = this.remotoSprite.scaleX;
+        this.remotoBaseScaleY = this.remotoSprite.scaleY;
+
         // Sombra bajo cada jugador para hacer mas visibles
         this.localShadow = this.add.ellipse(this.local.pixelX, this.local.pixelY + tile * 0.35,
             tile * 0.6, tile * 0.2, 0x000000, 0.3).setDepth(9);
@@ -1067,6 +1074,10 @@ class SceneGame extends Phaser.Scene {
 
     animarMovimiento(delta) {
         const tile = this.L.tile;
+        const bsxL = this.localBaseScaleX || 1;
+        const bsyL = this.localBaseScaleY || 1;
+        const bsxR = this.remotoBaseScaleX || 1;
+        const bsyR = this.remotoBaseScaleY || 1;
 
         if (this.localSprite && this.local.alive) {
             if (this.local.moving) {
@@ -1075,13 +1086,13 @@ class SceneGame extends Phaser.Scene {
                 const squash = 1 + Math.sin(this.walkAnimTimer * 12) * 0.06;
                 this.localSprite.setY(this.local.pixelY + bob);
                 this.localSprite.setX(this.local.pixelX);
-                this.localSprite.setScale(squash, 2 - squash);
+                this.localSprite.setScale(bsxL * squash, bsyL * (2 - squash));
                 // Flip horizontal segun direccion
                 this.localSprite.setFlipX(this.local.dir === 'left');
             } else {
                 this.walkAnimTimer = 0;
                 this.localSprite.setPosition(this.local.pixelX, this.local.pixelY);
-                this.localSprite.setScale(1, 1);
+                this.localSprite.setScale(bsxL, bsyL);
             }
             // Actualizar sombra
             if (this.localShadow) {
@@ -1099,10 +1110,10 @@ class SceneGame extends Phaser.Scene {
                 const bob = Math.sin(Date.now() * 0.008) * tile * 0.05;
                 this.remotoSprite.setY(ty + bob);
                 const sq = 1 + Math.sin(Date.now() * 0.016) * 0.05;
-                this.remotoSprite.setScale(sq, 2 - sq);
+                this.remotoSprite.setScale(bsxR * sq, bsyR * (2 - sq));
             } else {
                 this.remotoSprite.setPosition(tx, ty);
-                this.remotoSprite.setScale(1, 1);
+                this.remotoSprite.setScale(bsxR, bsyR);
             }
             if (this.remotoShadow) {
                 this.remotoShadow.setPosition(this.remoto.pixelX, this.remoto.pixelY + tile * 0.35);
