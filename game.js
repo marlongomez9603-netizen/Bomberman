@@ -550,7 +550,11 @@ class SceneMenu extends Phaser.Scene {
 
             escucharSala(id, (datos) => {
                 if (datos.estado === 'jugando' && datos.jugador2) {
-                    const rivalPersonaje = datos.jugador2.personaje ?? 0;
+                    let rivalPersonaje = datos.jugador2.personaje ?? 0;
+                    // Si el rival eligio el mismo personaje, asignarle el siguiente
+                    if (rivalPersonaje === estadoGlobal.personaje) {
+                        rivalPersonaje = (rivalPersonaje + 1) % 4;
+                    }
                     estadoGlobal.personajeRival = rivalPersonaje;
                     this.textoEspera.setText('Rival: ' + datos.jugador2.nombre + ' - Iniciando!');
                     this.time.delayedCall(1000, () => {
@@ -580,7 +584,11 @@ class SceneMenu extends Phaser.Scene {
             if (datos.jugador2) { this.textoEstado.setText('Sala llena').setColor('#ff4444'); return; }
 
             const fullSeed = datos.timer_inicio;
-            const rivalPersonaje = datos.jugador1?.personaje ?? 0;
+            let rivalPersonaje = datos.jugador1?.personaje ?? 0;
+            // Si el rival eligio el mismo personaje, auto-cambiar el mio
+            if (rivalPersonaje === estadoGlobal.personaje) {
+                estadoGlobal.personaje = (estadoGlobal.personaje + 2) % 4;
+            }
             estadoGlobal = { ...estadoGlobal, idSala: id, nombreJugador: nombre, numJugador: 2, canal: null };
             estadoGlobal.personajeRival = rivalPersonaje;
 
@@ -873,9 +881,9 @@ class SceneGame extends Phaser.Scene {
         const gridW = COLS * tile, gridH = ROWS * tile;
         const cx = offX + gridW / 2, cy = offY + gridH / 2;
 
-        // Fondo imagen del mapa (baja opacidad)
+        // Fondo imagen del mapa (visible)
         this.add.image(cx, cy, `map${this.mapType}`)
-            .setDisplaySize(gridW, gridH).setAlpha(0.30).setDepth(0);
+            .setDisplaySize(gridW, gridH).setAlpha(0.55).setDepth(0);
 
         // Tiles
         for (let y = 0; y < ROWS; y++) {
@@ -904,13 +912,22 @@ class SceneGame extends Phaser.Scene {
     // ========== JUGADORES ==========
     crearJugadores() {
         const tile = this.L.tile;
-        const charSize = Math.round(tile * 1.6);
+        const charSize = Math.round(tile * 1.4);
 
         this.localSprite = this.add.image(this.local.pixelX, this.local.pixelY, `char${this.miPersonaje}`)
-            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.82).setDepth(10);
+            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.5).setDepth(10);
 
         this.remotoSprite = this.add.image(this.remoto.pixelX, this.remoto.pixelY, `char${this.rivalPersonaje}`)
-            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.82).setDepth(10);
+            .setDisplaySize(charSize, charSize).setOrigin(0.5, 0.5).setDepth(10);
+
+        // Sombra bajo cada jugador para hacer mas visibles
+        this.localShadow = this.add.ellipse(this.local.pixelX, this.local.pixelY + tile * 0.35,
+            tile * 0.6, tile * 0.2, 0x000000, 0.3).setDepth(9);
+        this.remotoShadow = this.add.ellipse(this.remoto.pixelX, this.remoto.pixelY + tile * 0.35,
+            tile * 0.6, tile * 0.2, 0x000000, 0.3).setDepth(9);
+
+        // Timer de animacion de bobbing
+        this.walkAnimTimer = 0;
     }
 
     // ========== UPDATE ==========
@@ -935,6 +952,54 @@ class SceneGame extends Phaser.Scene {
         if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || this.touchBomb) {
             this.ponerBomba();
             this.touchBomb = false;
+        }
+
+        // Animacion de caminar (bobbing + squash)
+        this.animarMovimiento(delta);
+    }
+
+    animarMovimiento(delta) {
+        const tile = this.L.tile;
+
+        if (this.localSprite && this.local.alive) {
+            if (this.local.moving) {
+                this.walkAnimTimer += delta * 0.012;
+                const bob = Math.sin(this.walkAnimTimer * 6) * tile * 0.06;
+                const squash = 1 + Math.sin(this.walkAnimTimer * 12) * 0.06;
+                this.localSprite.setY(this.local.pixelY + bob);
+                this.localSprite.setX(this.local.pixelX);
+                this.localSprite.setScale(squash, 2 - squash);
+                // Flip horizontal segun direccion
+                this.localSprite.setFlipX(this.local.dir === 'left');
+            } else {
+                this.walkAnimTimer = 0;
+                this.localSprite.setPosition(this.local.pixelX, this.local.pixelY);
+                this.localSprite.setScale(1, 1);
+            }
+            // Actualizar sombra
+            if (this.localShadow) {
+                this.localShadow.setPosition(this.local.pixelX, this.local.pixelY + tile * 0.35);
+            }
+        }
+
+        // Animacion suave del remoto (interpolacion)
+        if (this.remotoSprite && this.remoto.alive) {
+            const rx = this.remotoSprite.x, ry = this.remotoSprite.y;
+            const tx = this.remoto.pixelX, ty = this.remoto.pixelY;
+            const isMoving = Math.abs(rx - tx) > 1 || Math.abs(ry - ty) > 1;
+            if (isMoving) {
+                this.remotoSprite.setFlipX(this.remoto.dir === 'left');
+                const bob = Math.sin(Date.now() * 0.008) * tile * 0.05;
+                this.remotoSprite.setY(ty + bob);
+                const sq = 1 + Math.sin(Date.now() * 0.016) * 0.05;
+                this.remotoSprite.setScale(sq, 2 - sq);
+            } else {
+                this.remotoSprite.setPosition(tx, ty);
+                this.remotoSprite.setScale(1, 1);
+            }
+            if (this.remotoShadow) {
+                this.remotoShadow.setPosition(this.remoto.pixelX, this.remoto.pixelY + tile * 0.35);
+            }
         }
     }
 
@@ -983,7 +1048,7 @@ class SceneGame extends Phaser.Scene {
             }
         }
 
-        if (this.localSprite) this.localSprite.setPosition(this.local.pixelX, this.local.pixelY);
+        // La posicion del sprite se actualiza en animarMovimiento()
     }
 
     puedeMover(x, y) {
