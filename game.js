@@ -221,25 +221,96 @@ function generarIdSala() {
 
 // ============================================================
 //  CHROMA KEY — Elimina fondo verde de sprites
+//  Usa createCanvas + refresh (compatible con WebGL)
 // ============================================================
 function aplicarChromaKey(scene, sourceKey, destKey) {
-    const src = scene.textures.get(sourceKey).getSourceImage();
-    const canvas = document.createElement('canvas');
-    canvas.width = src.width;
-    canvas.height = src.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(src, 0, 0);
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-        const r = d[i], g = d[i + 1], b = d[i + 2];
-        if (g > 80 && g > r * 1.4 && g > b * 1.4 && (g - r) > 40 && (g - b) > 40)
-            d[i + 3] = 0;
+    try {
+        const srcTex = scene.textures.get(sourceKey);
+        // Verificar que la textura cargo correctamente
+        if (!srcTex || srcTex.key === '__MISSING') {
+            console.warn('Textura no encontrada:', sourceKey);
+            return false;
+        }
+        const src = srcTex.getSourceImage();
+        if (!src || src.width === 0) {
+            console.warn('Imagen vacia:', sourceKey);
+            return false;
+        }
+
+        // Crear canvas temporal para manipular pixeles
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = src.width;
+        tempCanvas.height = src.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(src, 0, 0);
+        const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            if (g > 80 && g > r * 1.4 && g > b * 1.4 && (g - r) > 40 && (g - b) > 40)
+                d[i + 3] = 0;
+        }
+        tempCtx.putImageData(imgData, 0, 0);
+
+        // Usar createCanvas de Phaser (compatible con WebGL)
+        if (scene.textures.exists(destKey)) scene.textures.remove(destKey);
+        const phaserTex = scene.textures.createCanvas(destKey, tempCanvas.width, tempCanvas.height);
+        phaserTex.context.drawImage(tempCanvas, 0, 0);
+        phaserTex.refresh();
+        return true;
+    } catch (e) {
+        console.error('Error chroma key:', sourceKey, e);
+        return false;
     }
-    ctx.putImageData(imgData, 0, 0);
-    if (scene.textures.exists(destKey)) scene.textures.remove(destKey);
-    scene.textures.addCanvas(destKey, canvas);
 }
+
+// Verificar si una textura es valida (no es la de "missing")
+function texturaValida(scene, key) {
+    if (!scene.textures.exists(key)) return false;
+    const tex = scene.textures.get(key);
+    return tex && tex.key !== '__MISSING';
+}
+
+// Generar textura de personaje de respaldo (programatica)
+function generarPersonajeFallback(scene, key, colorCuerpo, colorAccento) {
+    const g = scene.make.graphics({ add: false });
+    const T = TILE_BASE;
+    g.clear();
+    // Cuerpo
+    g.fillStyle(colorAccento);
+    g.fillRect(12, 22, 24, 18);
+    // Cabeza
+    g.fillStyle(colorCuerpo);
+    g.fillCircle(T / 2, 16, 12);
+    // Ojos
+    g.fillStyle(0x000000);
+    g.fillRect(18, 12, 4, 5);
+    g.fillRect(26, 12, 4, 5);
+    g.fillStyle(0xffffff);
+    g.fillRect(19, 13, 2, 2);
+    g.fillRect(27, 13, 2, 2);
+    // Antena
+    g.fillStyle(colorAccento);
+    g.fillRect(22, 0, 4, 8);
+    g.fillCircle(T / 2, 2, 4);
+    // Pies
+    g.fillStyle(0x222222);
+    g.fillRect(14, 40, 8, 6);
+    g.fillRect(26, 40, 8, 6);
+    // Cinturon
+    g.fillStyle(colorCuerpo);
+    g.fillRect(12, 30, 24, 3);
+    g.generateTexture(key, T, T);
+    g.destroy();
+}
+
+// Colores fallback para los 4 personajes
+const CHAR_FALLBACK_COLORS = [
+    { cuerpo: 0xe94560, accento: 0xcc2244 },  // Bomber (rojo)
+    { cuerpo: 0x333333, accento: 0xcc44ff },  // Dark (morado)
+    { cuerpo: 0xffcc00, accento: 0xdd9900 },  // Astro (amarillo)
+    { cuerpo: 0xffffff, accento: 0x4488ff },  // Classic (azul)
+];
 
 // ============================================================
 //  TEXTURAS PIXEL ART PROGRAMATICAS
@@ -360,7 +431,34 @@ class SceneMenu extends Phaser.Scene {
         document.getElementById('loading-screen').style.display = 'none';
 
         generarTexturas(this);
-        for (let i = 0; i < 4; i++) aplicarChromaKey(this, `char${i}_raw`, `char${i}`);
+
+        // Desactivar captura global de teclado para que los inputs HTML funcionen
+        this.input.keyboard.disableGlobalCapture();
+
+        // Aplicar chroma key a personajes; si falla, usar textura de respaldo
+        for (let i = 0; i < 4; i++) {
+            const ok = aplicarChromaKey(this, `char${i}_raw`, `char${i}`);
+            if (!ok) {
+                const c = CHAR_FALLBACK_COLORS[i];
+                generarPersonajeFallback(this, `char${i}`, c.cuerpo, c.accento);
+                console.log(`Personaje ${i}: usando sprite de respaldo`);
+            }
+        }
+
+        // Verificar que los mapas cargaron; si no, generar respaldo
+        for (let i = 0; i < 5; i++) {
+            if (!texturaValida(this, `map${i}`)) {
+                // Generar miniatura de mapa programatica
+                const g = this.make.graphics({ add: false });
+                const colores = [0x3d8b37, 0x8b7355, 0x2d2d3d, 0x1a3320, 0x6b7355];
+                g.fillStyle(colores[i]); g.fillRect(0, 0, 100, 75);
+                g.fillStyle(0x555566); g.fillRect(10, 10, 80, 55);
+                g.fillStyle(colores[i]); g.fillRect(15, 15, 70, 45);
+                g.generateTexture(`map${i}`, 100, 75);
+                g.destroy();
+                console.log(`Mapa ${i}: usando miniatura de respaldo`);
+            }
+        }
 
         const W = this.scale.width, H = this.scale.height;
         const small = W < 600;
@@ -669,7 +767,8 @@ class SceneGame extends Phaser.Scene {
         // UI
         this.construirUI();
 
-        // Teclado
+        // Teclado — reactivar captura (fue desactivada en menu para los inputs)
+        this.input.keyboard.enableGlobalCapture();
         this.cursors = this.input.keyboard.createCursorKeys();
         this.keys = this.input.keyboard.addKeys({
             W: Phaser.Input.Keyboard.KeyCodes.W, A: Phaser.Input.Keyboard.KeyCodes.A,
@@ -881,9 +980,17 @@ class SceneGame extends Phaser.Scene {
         const gridW = COLS * tile, gridH = ROWS * tile;
         const cx = offX + gridW / 2, cy = offY + gridH / 2;
 
-        // Fondo imagen del mapa (visible)
-        this.add.image(cx, cy, `map${this.mapType}`)
-            .setDisplaySize(gridW, gridH).setAlpha(0.55).setDepth(0);
+        // Fondo imagen del mapa (visible) con fallback
+        const mapKey = `map${this.mapType}`;
+        if (texturaValida(this, mapKey)) {
+            this.add.image(cx, cy, mapKey)
+                .setDisplaySize(gridW, gridH).setAlpha(0.55).setDepth(0);
+        } else {
+            // Fallback: rectángulo de color según tipo de mapa
+            const mapColors = [0x2d5a1e, 0x3a3a5c, 0x5c2a0e, 0x1a3a5a, 0x4a1a3a];
+            this.add.rectangle(cx, cy, gridW, gridH, mapColors[this.mapType] || 0x2d5a1e)
+                .setAlpha(0.55).setDepth(0);
+        }
 
         // Tiles
         for (let y = 0; y < ROWS; y++) {
